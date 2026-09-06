@@ -4,9 +4,13 @@ If your source is listed here, I sincerely apologize. I understand that its incl
 
 This is a small hobby project that I built for learning and personal interest, not for profit. I genuinely want to respect the wishes of source owners and will address any removal requests as quickly as I can.
 
-This project is developed and maintained by [Vyla Entertainment](https://github.com/vyla-entertainment) (@vyla-entertainment).
+This project is developed and maintained by [Vyla Entertainment](https://gitlab.com/vyla-entertainment) (@vyla-entertainment).
 
-Original work and core authorship: [@endoverdosing](https://github.com/EndOverdosing)
+Original work and core authorship:
+
+[@alwaysmesmerizingyou](https://gitlab.com/alwaysmesmerizingyou)
+
+[@GavinGoGaming](https://gitlab.com/GavinGoGaming)
 
 Full credits and acknowledgements:
 https://docs.vyla.cc/misc/credit
