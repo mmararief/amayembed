@@ -9,7 +9,6 @@ import { CACHE_TTL } from './config.js';
 import { handleSubtitleMovie, handleSubtitleTv } from './src/routes/subtitles.js';
 import { handleDownloadMovie, handleDownloadTv } from './src/routes/downloads/main.js';
 import { handleHealth } from './src/routes/health.js';
-import { authenticateRequest, checkRateLimit, canAccess, issueSessionToken, refreshSessionToken, initAuth } from './src/middleware/auth.js';
 import { wrapUrl } from './src/utils/proxy.js';
 import { handleTestRoute, handleDebugRoute } from './src/routes/test.js';
 import { getUA, validateTmdbId } from './src/utils/helpers.js';
@@ -635,51 +634,192 @@ function normalizeCandidates(rawResult) {
     return candidates;
 }
 
+const LOOPBACK = `http://127.0.0.1:${PORT}`;
+const MAX_STREAMS_PER_SOURCE = 8;
+const VERIFY_BUDGET_MS = 15_000;
+
+function toLoopback(url, absoluteBase) {
+    const variants = new Set([
+        absoluteBase,
+        absoluteBase.replace(/^http:\/\//, 'https://'),
+        absoluteBase.replace(/^https:\/\//, 'http://'),
+    ]);
+    for (const b of variants) {
+        if (url.startsWith(`${b}/api?`)) return LOOPBACK + url.slice(b.length);
+    }
+    return url;
+}
+
+async function readHead(res, limit) {
+    const reader = res.body?.getReader();
+    if (!reader) return Buffer.alloc(0);
+    const chunks = [];
+    let total = 0;
+    try {
+        while (total < limit) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            chunks.push(value);
+            total += value.length;
+        }
+    } finally {
+        reader.cancel().catch(() => { });
+    }
+    return Buffer.concat(chunks).subarray(0, limit);
+}
+
+function looksLikeMedia(buf) {
+    if (buf.length < 8) return false;
+    if (buf[0] === 0x47 && (buf.length < 189 || buf[188] === 0x47)) return true;
+    const box = buf.subarray(4, 8).toString('latin1');
+    if (['ftyp', 'styp', 'moof', 'moov', 'sidx', 'mdat', 'free', 'wide'].includes(box)) return true;
+    if (buf[0] === 0x49 && buf[1] === 0x44 && buf[2] === 0x33) return true;
+    if (buf[0] === 0xFF && (buf[1] & 0xF0) === 0xF0) return true;
+    if (buf[0] === 0x1A && buf[1] === 0x45 && buf[2] === 0xDF && buf[3] === 0xA3) return true;
+    return false;
+}
+
+function firstUri(text, base) {
+    for (const line of text.split('\n')) {
+        const t = line.trim();
+        if (t && t.charCodeAt(0) !== 35) return new URL(t, base).href;
+    }
+    return null;
+}
+
+async function verifyServed(finalUrl, headers, absoluteBase) {
+    const cacheKey = `served-${finalUrl}`;
+    const cached = hlsVerifyCache.get(cacheKey);
+    if (cached !== undefined) return cached;
+    const store = ok => { hlsVerifyCache.set(cacheKey, ok); return ok; };
+
+    const get = url => _nativeFetch(toLoopback(url, absoluteBase), {
+        headers: { 'User-Agent': getUA(), ...headers },
+        redirect: 'follow',
+        signal: AbortSignal.timeout(10_000),
+    });
+
+    const accept = async (r, limit) => {
+        if (!r.ok && r.status !== 206) { r.body?.cancel(); return null; }
+        const ct = (r.headers.get('content-type') || '').toLowerCase();
+        if (ct.includes('text/html') || ct.includes('json')) { r.body?.cancel(); return null; }
+        return readHead(r, limit);
+    };
+
+    try {
+        let res = await get(finalUrl);
+        let buf = await accept(res, 65536);
+        if (!buf) return store(false);
+        let text = buf.toString('utf8');
+        let base = res.url || finalUrl;
+
+        if (!/^\s*#EXTM3U/.test(text)) {
+            if (text.includes('<MPD')) return store(true);
+            return store(looksLikeMedia(buf));
+        }
+
+        if (text.includes('#EXT-X-STREAM-INF')) {
+            const variantUrl = firstUri(text, base);
+            if (!variantUrl) return store(false);
+            res = await get(variantUrl);
+            buf = await accept(res, 65536);
+            if (!buf) return store(false);
+            text = buf.toString('utf8');
+            base = res.url || variantUrl;
+            if (!/^\s*#EXTM3U/.test(text) || text.includes('#EXT-X-STREAM-INF')) return store(false);
+        }
+
+        if (!text.includes('#EXTINF')) return store(false);
+
+        const keyLine = text.split('\n').find(l => /^#EXT-X-KEY:/.test(l.trim()) && !/METHOD=NONE/.test(l));
+        const encrypted = !!keyLine;
+        if (keyLine) {
+            const m = /URI="([^"]+)"/.exec(keyLine);
+            if (m && !m[1].startsWith('data:')) {
+                const kres = await get(new URL(m[1], base).href);
+                const kb = await accept(kres, 64);
+                if (!kb || kb.length !== 16) return store(false);
+            }
+        }
+
+        const segUrl = firstUri(text, base);
+        if (!segUrl) return store(false);
+        const sres = await get(segUrl);
+        const sb = await accept(sres, 4096);
+        if (!sb || sb.length < 188) return store(false);
+
+        if (encrypted) return store(!/^\s*[<{]/.test(sb.toString('latin1', 0, 16)));
+        return store(looksLikeMedia(sb));
+    } catch {
+        return false;
+    }
+}
+
+async function verifyCandidate(candidate, sourceKey, absoluteBase) {
+    if (!candidate?.url) return null;
+    const wrapped = wrapUrl(candidate, sourceKey, absoluteBase, sdk);
+    if (!wrapped) return null;
+
+    const viaProxy = wrapped !== candidate.url || toLoopback(wrapped, absoluteBase) !== wrapped;
+    const ok = await withTimeout(
+        verifyServed(wrapped, viaProxy ? {} : (candidate.headers ?? {}), absoluteBase),
+        VERIFY_BUDGET_MS
+    );
+    if (!ok) return null;
+
+    const out = { url: wrapped, raw_url: candidate.url, proxied: viaProxy };
+    if (!viaProxy && candidate.headers && Object.keys(candidate.headers).length) out.headers = candidate.headers;
+    for (const k of ['quality', 'type', 'name', 'language']) {
+        if (candidate[k] !== undefined) out[k] = candidate[k];
+    }
+    return out;
+}
+
 async function handleTestSource(sdk, sourceKey, id, s, e, clientIP, host) {
     const start = Date.now();
-    const sources = sdk.getSources();
-    const cfg = sources.find(c => c.key === sourceKey);
+    const cfg = sdk.getSources().find(c => c.key === sourceKey);
     const absoluteBase = getAbsoluteBase(host);
 
-    const respond = (ok, url, raw_url, error, debug) => ({
+    const respond = result => ({
         status: 200,
         body: JSON.stringify({
             source: sourceKey,
             id,
             s: s || null,
             e: e || null,
-            ok,
-            url: ok ? url : null,
-            raw_url,
+            ok: !!result?.ok,
+            url: result?.ok ? result.url : null,
+            streams: result?.ok ? result.streams : [],
+            raw_url: result?.raw_url ?? null,
             elapsed_ms: Date.now() - start,
-            error: ok ? null : error,
-            ...(debug ? { debug } : {}),
+            error: result?.ok ? null : (result?.error ?? null),
+            ...(result?.debug ? { debug: result.debug } : {}),
         }, null, 2),
         contentType: 'application/json',
     });
 
-    if (cfg?.disabled) return respond(false, null, null, 'source disabled');
+    if (!cfg) return respond({ ok: false, error: 'unknown source' });
+    if (cfg.disabled) return respond({ ok: false, error: 'source disabled' });
 
-    const cacheKey = `test-${sourceKey}-${id}-${s ?? ''}-${e ?? ''}`;
+    const cacheKey = `test-${sourceKey}-${id}-${s ?? ''}-${e ?? ''}-${host}`;
     const localCached = testResultCache.get(cacheKey);
-    if (localCached !== undefined) return respond(localCached.ok, localCached.url, localCached.raw_url, localCached.error);
+    if (localCached !== undefined) return respond(localCached);
 
     const shared = await sharedCacheGet(cacheKey);
-    if (shared !== undefined) { testResultCache.set(cacheKey, shared); return respond(shared.ok, shared.url, shared.raw_url, shared.error); }
+    if (shared !== undefined) { testResultCache.set(cacheKey, shared); return respond(shared); }
 
     const inflightKey = `inflight-${cacheKey}`;
     const existing = sharedInflight.get(inflightKey);
     if (existing) {
         try {
-            const result = await existing;
-            return respond(result?.ok ?? false, result?.url ?? null, result?.raw_url ?? null, result?.error ?? null);
+            return respond((await existing) ?? { ok: false, error: 'timed out' });
         } catch {
-            return respond(false, null, null, 'deduped request failed');
+            return respond({ ok: false, error: 'deduped request failed' });
         }
     }
 
     if (sharedInflight.size >= MAX_SHARED_INFLIGHT) {
-        return respond(false, null, null, 'server busy, try again shortly');
+        return respond({ ok: false, error: 'server busy, try again shortly' });
     }
 
     await acquireTestSlot();
@@ -687,147 +827,41 @@ async function handleTestSource(sdk, sourceKey, id, s, e, clientIP, host) {
     const testPromise = withTimeout((async () => {
         try {
             let rawResult = null, fetchError = null;
-            const audio = /dub$/.test(cfg.key) ? 'dub' : 'sub';
 
             try {
                 rawResult = await fetchSource(cfg, `${id}-${s ?? ''}-${e ?? ''}`, id, s, e, clientIP, absoluteBase);
                 if (!rawResult) rawResult = await withTimeout(sdk.getStream(sourceKey, id, s, e), 20_000);
             } catch (err) { fetchError = err.message; }
 
-            const candidates = normalizeCandidates(rawResult);
+            const seen = new Set();
+            const candidates = normalizeCandidates(rawResult)
+                .filter(c => {
+                    const u = typeof c?.url === 'string' ? c.url : null;
+                    if (!u || seen.has(u)) return false;
+                    seen.add(u);
+                    return true;
+                })
+                .slice(0, MAX_STREAMS_PER_SOURCE);
 
-            for (const candidate of candidates) {
-                const wrappedUrl = wrapUrl(candidate, sourceKey, absoluteBase, sdk);
-                if (!wrappedUrl) continue;
+            const verified = (await Promise.all(
+                candidates.map(c => verifyCandidate(c, sourceKey, absoluteBase).catch(() => null))
+            )).filter(Boolean);
 
-                if (candidate.type === 'dash' || /\.mpd(\?|$)/i.test(candidate.url)) {
-                    try {
-                        const headRes = await _nativeFetch(candidate.url, {
-                            method: 'HEAD',
-                            headers: { 'User-Agent': getUA(), ...(candidate.headers ?? {}) },
-                            signal: AbortSignal.timeout(6_000),
-                            redirect: 'follow',
-                        });
-                        headRes.body?.cancel();
-                        if (headRes.status < 400) {
-                            const result = { ok: true, url: wrappedUrl, raw_url: candidate.url };
-                            testResultCache.set(cacheKey, result);
-                            sharedCacheSet(cacheKey, result, cfg.testCacheTtl ?? 90_000);
-                            return result;
-                        }
-                    } catch { }
-                    continue;
-                }
-
-                if (candidate?.skipProxy) {
-                    const check = await verifyPlayable(candidate.url, candidate.headers ?? {}, true);
-                    if (check.ok || /timeout|aborted/i.test(check.error ?? '')) {
-                        const result = { ok: true, url: wrappedUrl, raw_url: candidate.url };
-                        testResultCache.set(cacheKey, result);
-                        sharedCacheSet(cacheKey, result, 90_000);
-                        return result;
-                    }
-                    try {
-                        const headRes = await _nativeFetch(candidate.url, {
-                            method: 'HEAD',
-                            headers: { 'User-Agent': getUA(), ...(candidate.headers ?? {}) },
-                            signal: AbortSignal.timeout(6_000),
-                            redirect: 'follow',
-                        });
-                        headRes.body?.cancel();
-                        const ct = (headRes.headers.get('content-type') || '').toLowerCase();
-                        if (headRes.status < 400 && (!ct || /video|octet-stream|mp4/.test(ct) && !ct.includes('mpegurl'))) {
-                            const result = { ok: true, url: wrappedUrl, raw_url: candidate.url };
-                            testResultCache.set(cacheKey, result);
-                            sharedCacheSet(cacheKey, result, 90_000);
-                            return result;
-                        }
-                    } catch { }
-                    continue;
-                }
-
-                if (candidate?.skipHlsCheck) {
-                    try {
-                        const r = await _nativeFetch(wrappedUrl, {
-                            signal: AbortSignal.timeout(8_000),
-                            headers: { 'User-Agent': getUA() },
-                        });
-                        if (!r.ok) {
-                            const body = await r.text();
-                            return { ok: false, url: null, raw_url: candidate.url, error: `skipHlsCheck proxy failed: ${r.status} - ${body.slice(0, 100)}` };
-                        }
-                        const result = { ok: true, url: wrappedUrl, raw_url: candidate.url };
-                        testResultCache.set(cacheKey, result);
-                        sharedCacheSet(cacheKey, result, 90_000);
-                        return result;
-                    } catch (err) {
-                        return { ok: false, url: null, raw_url: candidate.url, error: `skipHlsCheck exception: ${err.message}` };
-                    }
-                }
-
-                if (cfg.skipVerify || cfg.multiUrl) {
-                    const checkUrl = IS_HF ? candidate.url : wrappedUrl;
-                    const checkHeaders = IS_HF ? (candidate.headers ?? {}) : {};
-
-                    const check = await verifyPlayable(checkUrl, checkHeaders, false);
-
-                    if (check.ok) {
-                        const result = { ok: true, url: wrappedUrl, raw_url: candidate.url };
-                        if (!rawResult?.skipCache) { testResultCache.set(cacheKey, result); sharedCacheSet(cacheKey, result, cfg.testCacheTtl ?? 90_000); }
-                        return result;
-                    }
-
-                    if (/timeout|aborted/i.test(check.error ?? '')) {
-                        const result = { ok: true, url: wrappedUrl, raw_url: candidate.url };
-                        if (!rawResult?.skipCache) { testResultCache.set(cacheKey, result); sharedCacheSet(cacheKey, result, 15_000); }
-                        return result;
-                    }
-
-                    try {
-                        const headRes = await _nativeFetch(candidate.url, {
-                            method: 'HEAD',
-                            headers: { 'User-Agent': getUA(), ...(candidate.headers ?? {}) },
-                            signal: AbortSignal.timeout(6_000),
-                            redirect: 'follow',
-                        });
-                        headRes.body?.cancel();
-                        const ct = (headRes.headers.get('content-type') || '').toLowerCase();
-                        if (headRes.status < 400 && /video|octet-stream|mp4/.test(ct) && !ct.includes('mpegurl')) {
-                            const result = { ok: true, url: wrappedUrl, raw_url: candidate.url };
-                            testResultCache.set(cacheKey, result);
-                            sharedCacheSet(cacheKey, result, cfg.testCacheTtl ?? 90_000);
-                            return result;
-                        }
-                    } catch { }
-                    continue;
-                }
-
-                if (!(await verifyStream(candidate.url, sourceKey, candidate?.headers ?? {}))) continue;
-
-                const verifyUrl = IS_HF ? candidate.url : wrappedUrl;
-                const verifyHeaders = IS_HF ? (candidate.headers ?? {}) : {};
-                const check = await verifyPlayable(verifyUrl, verifyHeaders, IS_HF);
-
-                if (!check.ok) {
-                    const rawHeaders = candidate?.headers ?? {};
-                    const [proxiedBody, rawCheck] = await Promise.all([
-                        _nativeFetch(wrappedUrl, { signal: AbortSignal.timeout(10_000), headers: { 'User-Agent': getUA() } })
-                            .then(r => r.text()).then(t => t.slice(0, 200)).catch(e => e.message),
-                        verifyPlayable(candidate.url, rawHeaders, true),
-                    ]);
-                    return {
-                        ok: false, url: null, raw_url: candidate.url, error: check.error,
-                        debug: { proxy_failed: true, proxy_error: check.error, proxy_body_preview: proxiedBody, raw_reachable: rawCheck.ok, raw_error: rawCheck.error, raw_headers_used: rawHeaders, proxied_url: wrappedUrl },
-                    };
-                }
-
-                const result = { ok: true, url: wrappedUrl, raw_url: candidate.url };
-                testResultCache.set(cacheKey, result);
-                sharedCacheSet(cacheKey, result, 90_000);
-                return result;
+            if (!verified.length) {
+                return {
+                    ok: false,
+                    url: null,
+                    raw_url: candidates[0]?.url || null,
+                    error: fetchError || (candidates.length ? 'no playable streams' : 'no streams returned'),
+                };
             }
 
-            return { ok: false, url: null, raw_url: candidates[0]?.url || null, error: fetchError };
+            const result = { ok: true, url: verified[0].url, raw_url: verified[0].raw_url, streams: verified };
+            if (!rawResult?.skipCache) {
+                testResultCache.set(cacheKey, result);
+                sharedCacheSet(cacheKey, result, cfg.testCacheTtl ?? 90_000);
+            }
+            return result;
         } finally {
             releaseTestSlot();
             sharedInflight.delete(inflightKey);
@@ -836,7 +870,7 @@ async function handleTestSource(sdk, sourceKey, id, s, e, clientIP, host) {
 
     sharedInflight.set(inflightKey, testPromise);
     const result = await testPromise;
-    return respond(result?.ok ?? false, result?.url ?? null, result?.raw_url ?? null, result?.error ?? null, result?.debug ?? null);
+    return respond(result ?? { ok: false, error: 'timed out' });
 }
 
 async function streamSources(sources, id, s, e, clientIP, absoluteBase, res) {
@@ -860,10 +894,31 @@ async function streamSources(sources, id, s, e, clientIP, absoluteBase, res) {
             const result = await handleTestSource(sdk, cfg.key, id, s, e, clientIP, host);
             if (closed) return;
             const parsed = JSON.parse(result.body);
-            debugResults.push({ source: cfg.key, ok: parsed.ok, error: parsed.error || null, elapsed_ms: parsed.elapsed_ms });
-            if (parsed.ok && parsed.url && !sent.has(parsed.url)) {
-                sent.add(parsed.url);
-                safeWrite(`data: ${JSON.stringify({ type: 'source', source: { source: cfg.key, label: cfg.label ?? cfg.key, url: parsed.url } })}\n\n`);
+            debugResults.push({
+                source: cfg.key,
+                ok: parsed.ok,
+                streams: parsed.streams?.length ?? 0,
+                error: parsed.error || null,
+                elapsed_ms: parsed.elapsed_ms,
+            });
+            if (!parsed.ok) return;
+
+            const label = cfg.label ?? cfg.key;
+            let n = 0;
+            for (const stream of parsed.streams || []) {
+                if (sent.has(stream.url)) continue;
+                sent.add(stream.url);
+                n++;
+                const { raw_url, ...publicStream } = stream;
+                safeWrite(`data: ${JSON.stringify({
+                    type: 'source',
+                    source: {
+                        source: cfg.key,
+                        label: n > 1 ? `${label} ${n}` : label,
+                        index: n - 1,
+                        ...publicStream,
+                    },
+                })}\n\n`);
             }
         } catch (err) {
             debugResults.push({ source: cfg.key, ok: false, error: err.message });
@@ -894,47 +949,6 @@ async function handleRequest(req, res) {
     if (BLOCKED_IPS.size && BLOCKED_IPS.has(clientIP)) return respondJson(403, { error: 'forbidden' });
 
     if (req.method === 'OPTIONS') return { status: 204, body: '', headers: CORS_HEADERS };
-
-    const PUBLIC_ROUTES = new Set(['/', '']);
-    const isPublicRoute = PUBLIC_ROUTES.has(pathname) && req.method === 'GET';
-
-    const authResult = authenticateRequest(req);
-
-    if (!isPublicRoute) {
-        if (!authResult.valid) return respondJson(401, { error: authResult.error });
-        if (!canAccess(authResult.type, req, pathname)) return respondJson(403, { error: 'Access denied' });
-
-        const authHeader = req.headers['authorization'];
-        const apiKey = authHeader?.replace('Bearer ', '')?.trim() || req.headers['x-api-key']?.trim() || authResult.key;
-
-        if (apiKey && !authResult.bypassed && !authResult.internal) {
-            const rateLimitResult = checkRateLimit(apiKey, clientIP);
-            if (!rateLimitResult.allowed) {
-                return respondJson(429, { error: rateLimitResult.error, resetAt: rateLimitResult.resetAt, limit: rateLimitResult.limit, window: rateLimitResult.window });
-            }
-        }
-
-    }
-
-    if (pathname === '/api/auth' && req.method === 'POST') {
-        if (authResult.bypassed) {
-            return respondJson(200, { token: issueSessionToken('standard', 'bypassed') });
-        }
-        if (authResult.type === 'player') {
-            return respondJson(401, { error: 'API key required for session token generation' });
-        }
-        return respondJson(200, { token: issueSessionToken(authResult.type, authResult.key) });
-    }
-
-    if (pathname === '/api/auth/refresh' && req.method === 'POST') {
-        const existingToken = req.headers['x-session-token']?.trim();
-        if (!existingToken) return respondJson(400, { error: 'Missing session token' });
-
-        const refreshed = refreshSessionToken(existingToken);
-        if (!refreshed) return respondJson(401, { error: 'Session token cannot be refreshed. Re-authenticate via /api/auth.' });
-
-        return respondJson(200, { token: refreshed });
-    }
 
     if (pathname === '/' || pathname === '') {
         return {
@@ -1254,5 +1268,4 @@ server.timeout = 90_000;
 
 server.on('error', err => { if (err.code !== 'EADDRINUSE') console.error('server error', err.message); });
 await validateGAConfig();
-await initAuth();
 server.listen(PORT, '0.0.0.0', () => console.log(`http://localhost:${PORT}`));

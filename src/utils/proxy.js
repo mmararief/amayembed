@@ -1,5 +1,3 @@
-import { issueSessionToken } from '../middleware/auth.js';
-
 const PROXY_STREAMS = process.env.PROXY_STREAMS === "true";
 const EXTERNAL_PROXY_URL = (process.env.PROXY_URL || "").replace(/\/+$/, "");
 
@@ -37,8 +35,6 @@ export function wrapUrl(rawUrl, sourceKey, absoluteBase, sdk) {
 
         const params = new URLSearchParams({ url: normalized, [proxyParam]: "1" });
         if (typeof rawUrl === "object" && rawUrl.headers) params.set("proxyHeaders", JSON.stringify(rawUrl.headers));
-        params.set("internal_token", issueSessionToken("internal", sourceKey));
-
         return buildProxyUrl(`${safeBase}/api`, params);
     }
 
