@@ -687,49 +687,57 @@ function firstUri(text, base) {
     return null;
 }
 
-async function verifyServed(finalUrl, headers, absoluteBase) {
+async function verifyServed(finalUrl, headers, absoluteBase, trace = []) {
     const cacheKey = `served-${finalUrl}`;
     const cached = hlsVerifyCache.get(cacheKey);
-    if (cached !== undefined) return cached;
+    if (cached !== undefined) { trace.push(`cache:${cached}`); return cached; }
     const store = ok => { hlsVerifyCache.set(cacheKey, ok); return ok; };
+    const fail = why => { trace.push(why); return store(false); };
 
-    const get = url => _nativeFetch(toLoopback(url, absoluteBase), {
-        headers: { 'User-Agent': getUA(), ...headers },
-        redirect: 'follow',
-        signal: AbortSignal.timeout(10_000),
-    });
+    const get = url => {
+        const target = toLoopback(url, absoluteBase);
+        trace.push(`GET ${target}`);
+        return _nativeFetch(target, {
+            headers: { 'User-Agent': getUA(), ...headers },
+            redirect: 'follow',
+            signal: AbortSignal.timeout(10_000),
+        });
+    };
 
-    const accept = async (r, limit) => {
-        if (!r.ok && r.status !== 206) { r.body?.cancel(); return null; }
+    const accept = async (r, limit, lenient = false) => {
         const ct = (r.headers.get('content-type') || '').toLowerCase();
-        if (ct.includes('text/html') || ct.includes('json')) { r.body?.cancel(); return null; }
+        if (!r.ok && r.status !== 206) { trace.push(`status ${r.status} ct=${ct}`); r.body?.cancel(); return null; }
+        if (!lenient && (ct.includes('text/html') || ct.includes('json'))) { trace.push(`rejected ct=${ct}`); r.body?.cancel(); return null; }
         return readHead(r, limit);
     };
 
     try {
         let res = await get(finalUrl);
         let buf = await accept(res, 65536);
-        if (!buf) return store(false);
+        if (!buf) return fail('playlist fetch rejected');
         let text = buf.toString('utf8');
         let base = res.url || finalUrl;
+        trace.push(`playlist head: ${JSON.stringify(text.slice(0, 160))}`);
 
         if (!/^\s*#EXTM3U/.test(text)) {
             if (text.includes('<MPD')) return store(true);
-            return store(looksLikeMedia(buf));
+            return looksLikeMedia(buf) ? store(true) : fail('not m3u8 and not media');
         }
 
         if (text.includes('#EXT-X-STREAM-INF')) {
             const variantUrl = firstUri(text, base);
-            if (!variantUrl) return store(false);
+            if (!variantUrl) return fail('master has no variant uri');
             res = await get(variantUrl);
             buf = await accept(res, 65536);
-            if (!buf) return store(false);
+            if (!buf) return fail('variant fetch rejected');
             text = buf.toString('utf8');
             base = res.url || variantUrl;
-            if (!/^\s*#EXTM3U/.test(text) || text.includes('#EXT-X-STREAM-INF')) return store(false);
+            trace.push(`variant head: ${JSON.stringify(text.slice(0, 160))}`);
+            if (!/^\s*#EXTM3U/.test(text)) return fail('variant not m3u8');
+            if (text.includes('#EXT-X-STREAM-INF')) return fail('variant is another master');
         }
 
-        if (!text.includes('#EXTINF')) return store(false);
+        if (!text.includes('#EXTINF')) return fail('no #EXTINF in media playlist');
 
         const keyLine = text.split('\n').find(l => /^#EXT-X-KEY:/.test(l.trim()) && !/METHOD=NONE/.test(l));
         const encrypted = !!keyLine;
@@ -738,34 +746,42 @@ async function verifyServed(finalUrl, headers, absoluteBase) {
             if (m && !m[1].startsWith('data:')) {
                 const kres = await get(new URL(m[1], base).href);
                 const kb = await accept(kres, 64);
-                if (!kb || kb.length !== 16) return store(false);
+                if (!kb) return fail('key fetch rejected');
+                if (kb.length !== 16) return fail(`key length ${kb.length}`);
             }
         }
 
         const segUrl = firstUri(text, base);
-        if (!segUrl) return store(false);
+        if (!segUrl) return fail('no segment uri');
         const sres = await get(segUrl);
-        const sb = await accept(sres, 4096);
-        if (!sb || sb.length < 188) return store(false);
+        const sb = await accept(sres, 4096, true);
+        if (!sb) return fail('segment fetch rejected');
+        if (sb.length < 188) return fail(`segment too short ${sb.length}`);
 
-        if (encrypted) return store(!/^\s*[<{]/.test(sb.toString('latin1', 0, 16)));
-        return store(looksLikeMedia(sb));
-    } catch {
+        if (encrypted) {
+            const bad = /^\s*[<{]/.test(sb.toString('latin1', 0, 16));
+            return bad ? fail('encrypted segment looks like text') : store(true);
+        }
+        if (looksLikeMedia(sb)) return store(true);
+        return fail(`segment unrecognized, first bytes ${sb.subarray(0, 12).toString('hex')}`);
+    } catch (err) {
+        trace.push(`threw ${err.message}`);
         return false;
     }
 }
 
-async function verifyCandidate(candidate, sourceKey, absoluteBase) {
+async function verifyCandidate(candidate, sourceKey, absoluteBase, trace = []) {
     if (!candidate?.url) return null;
     const wrapped = wrapUrl(candidate, sourceKey, absoluteBase, sdk);
-    if (!wrapped) return null;
+    if (!wrapped) { trace.push('wrapUrl returned null'); return null; }
 
     const viaProxy = wrapped !== candidate.url || toLoopback(wrapped, absoluteBase) !== wrapped;
+    trace.push(`wrapped=${wrapped} viaProxy=${viaProxy}`);
     const ok = await withTimeout(
-        verifyServed(wrapped, viaProxy ? {} : (candidate.headers ?? {}), absoluteBase),
+        verifyServed(wrapped, viaProxy ? {} : (candidate.headers ?? {}), absoluteBase, trace),
         VERIFY_BUDGET_MS
     );
-    if (!ok) return null;
+    if (!ok) { trace.push('verify failed or timed out'); return null; }
 
     const out = { url: wrapped, raw_url: candidate.url, proxied: viaProxy };
     if (!viaProxy && candidate.headers && Object.keys(candidate.headers).length) out.headers = candidate.headers;
@@ -843,8 +859,13 @@ async function handleTestSource(sdk, sourceKey, id, s, e, clientIP, host) {
                 })
                 .slice(0, MAX_STREAMS_PER_SOURCE);
 
+            const traces = [];
             const verified = (await Promise.all(
-                candidates.map(c => verifyCandidate(c, sourceKey, absoluteBase).catch(() => null))
+                candidates.map(c => {
+                    const trace = [];
+                    traces.push({ url: c.url, trace });
+                    return verifyCandidate(c, sourceKey, absoluteBase, trace).catch(err => { trace.push(`threw ${err.message}`); return null; });
+                })
             )).filter(Boolean);
 
             if (!verified.length) {
@@ -853,6 +874,7 @@ async function handleTestSource(sdk, sourceKey, id, s, e, clientIP, host) {
                     url: null,
                     raw_url: candidates[0]?.url || null,
                     error: fetchError || (candidates.length ? 'no playable streams' : 'no streams returned'),
+                    debug: traces,
                 };
             }
 
