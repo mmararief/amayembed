@@ -1,7 +1,14 @@
+node_modules/
+nextjs/node_modules/
+nextjs/.next/
+.env
+.env.local
+nextjs/.env.local
+nextjs/.env*.local
 .wrangler
 .dev.vars
-node_modules/
-.env
 package-lock.json
+nextjs/package-lock.json
 data/
 db.json
+.DS_Store

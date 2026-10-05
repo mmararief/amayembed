@@ -60,6 +60,8 @@ const ROUTE_PATTERNS = {
     test: /^\/(?:api\/)?test\/([^/]+)$/,
     downloadMovie: /^\/(?:api\/)?downloads?\/movie\/([^/]+)$/,
     downloadTv: /^\/(?:api\/)?downloads?\/tv\/([^/]+)\/([^/]+)\/([^/]+)$/,
+    embedMovie: /^\/(?:api\/)?embed\/movie\/([^/]+)$/,
+    embedTv: /^\/(?:api\/)?embed\/tv\/([^/]+)\/([^/]+)\/([^/]+)$/,
 };
 
 const TMDB_API_KEY = process.env.TMDB_API_KEY;
@@ -972,6 +974,41 @@ async function handleRequest(req, res) {
 
     if (req.method === 'OPTIONS') return { status: 204, body: '', headers: CORS_HEADERS };
 
+    if (pathname === '/favicon.ico') {
+        try {
+            const ico = fs.readFileSync(path.join(__dirname, 'public/favicon.ico'));
+            return { status: 200, body: ico, headers: { 'Content-Type': 'image/x-icon', ...CORS_HEADERS } };
+        } catch {
+            return respondJson(404, { error: 'not found' });
+        }
+    }
+
+    if (pathname === '/embed' || pathname === '/api/embed' || ROUTE_PATTERNS.embedMovie.test(pathname) || ROUTE_PATTERNS.embedTv.test(pathname)) {
+        try {
+            const html = fs.readFileSync(path.join(__dirname, 'public/embed.html'), 'utf8');
+            return {
+                status: 200,
+                body: html,
+                headers: { 'Content-Type': 'text/html; charset=utf-8', ...CORS_HEADERS },
+            };
+        } catch (e) {
+            return respondJson(404, { error: 'embed template not found' });
+        }
+    }
+
+    if (pathname === '/player' || pathname === '/play' || ((pathname === '/' || pathname === '') && req.headers['accept']?.includes('text/html'))) {
+        try {
+            const html = fs.readFileSync(path.join(__dirname, 'public/index.html'), 'utf8');
+            return {
+                status: 200,
+                body: html,
+                headers: { 'Content-Type': 'text/html; charset=utf-8', ...CORS_HEADERS },
+            };
+        } catch (e) {
+            // fallback
+        }
+    }
+
     if (pathname === '/' || pathname === '') {
         return {
             status: 200,
@@ -1237,9 +1274,16 @@ async function handleRequest(req, res) {
             return respondJson(200, { sources: ACTIVE_SOURCES.map(c => ({ key: c.key, label: c.label, timeout: c.timeout })) });
         }
 
-        if (searchParams.has('tmdb_movie') || searchParams.has('tmdb_tv') || searchParams.has('tmdb_show') || searchParams.has('tmdb_season')) {
+        if (searchParams.has('tmdb_movie') || searchParams.has('tmdb_tv') || searchParams.has('tmdb_show') || searchParams.has('tmdb_season') || searchParams.has('tmdb_search')) {
             const k = process.env.TMDB_API_KEY;
             if (!k) return respondJson(500, { error: 'no key' });
+            if (searchParams.has('tmdb_search')) {
+                const query = encodeURIComponent(searchParams.get('q') || '');
+                const type = searchParams.get('type') === 'tv' ? 'tv' : 'movie';
+                const tmdbUrl = `https://api.themoviedb.org/3/search/${type}?api_key=${k}&query=${query}`;
+                try { const r = await _nativeFetch(tmdbUrl); return respondJson(200, await r.json()); }
+                catch (err) { return respondJson(500, { error: err.message }); }
+            }
             const tmdbId = searchParams.get('id'), tmdbSeason = searchParams.get('s');
             let tmdbUrl;
             if (searchParams.has('tmdb_season')) tmdbUrl = `https://api.themoviedb.org/3/tv/${tmdbId}/season/${tmdbSeason}?api_key=${k}`;

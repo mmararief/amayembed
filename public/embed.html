@@ -1,0 +1,660 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Stream Embed Player</title>
+  <link rel="icon" href="/favicon.ico">
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- HLS.js CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <style>
+    * {
+      box-sizing: border-box;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    body, html {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background-color: #000;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+    /* Hide native controls */
+    video::-webkit-media-controls {
+      display: none !important;
+    }
+    .custom-range {
+      -webkit-appearance: none;
+      background: rgba(255, 255, 255, 0.2);
+      border-radius: 4px;
+      height: 4px;
+      outline: none;
+      transition: height 0.15s ease;
+      cursor: pointer;
+    }
+    .custom-range:hover {
+      height: 6px;
+    }
+    .custom-range::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: #6366f1;
+      cursor: pointer;
+      box-shadow: 0 0 6px rgba(99, 102, 241, 0.8);
+      transition: transform 0.15s ease;
+    }
+    .custom-range:hover::-webkit-slider-thumb {
+      transform: scale(1.25);
+    }
+    /* Auto-hide controls when idle */
+    .controls-wrapper {
+      transition: opacity 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+    .idle .controls-wrapper {
+      opacity: 0;
+      pointer-events: none;
+      cursor: none;
+    }
+    /* Subtitle styling */
+    video::cue {
+      background: rgba(0, 0, 0, 0.75);
+      color: #fff;
+      font-family: inherit;
+      font-size: 1.1rem;
+      line-height: 1.4;
+      border-radius: 4px;
+      padding: 2px 6px;
+    }
+  </style>
+</head>
+<body class="bg-black text-white relative h-full w-full flex items-center justify-center group select-none">
+
+  <!-- Main Player Container -->
+  <div id="playerRoot" class="relative w-full h-full bg-black overflow-hidden flex items-center justify-center">
+
+    <!-- Video Element -->
+    <video id="video" class="w-full h-full object-contain cursor-pointer" playsinline crossorigin="anonymous"></video>
+
+    <!-- Overlay Big Play Button (Click to Play/Pause) -->
+    <div id="bigPlayBtn" onclick="togglePlay()" class="absolute inset-0 flex items-center justify-center bg-black/30 backdrop-blur-[2px] cursor-pointer transition-all duration-300 z-10 hidden">
+      <div class="w-20 h-20 rounded-full bg-indigo-600/90 text-white flex items-center justify-center shadow-2xl hover:scale-110 hover:bg-indigo-500 transition transform">
+        <i data-lucide="play" class="w-10 h-10 fill-current ml-1"></i>
+      </div>
+    </div>
+
+    <!-- Status / Loading Indicator -->
+    <div id="loadingOverlay" class="absolute inset-0 flex flex-col items-center justify-center bg-black/80 backdrop-blur-sm z-20 transition-opacity duration-300">
+      <div id="loadingSpinner" class="w-12 h-12 border-4 border-indigo-500/20 border-t-indigo-500 rounded-full animate-spin mb-3"></div>
+      <p id="loadingTitle" class="text-sm font-semibold tracking-wide text-white">Searching Stream Candidates...</p>
+      <p id="loadingSubtitle" class="text-xs text-slate-400 mt-1 max-w-xs text-center">Connecting to providers via SSE...</p>
+    </div>
+
+    <!-- Toast Notification (Top Right) -->
+    <div id="embedToast" class="absolute top-4 right-4 z-30 transition-all duration-300 opacity-0 transform -translate-y-4 pointer-events-none">
+      <div class="px-3.5 py-2 rounded-xl bg-slate-900/90 border border-slate-700/80 backdrop-blur-md text-xs text-white shadow-xl flex items-center gap-2">
+        <i id="toastIcon" data-lucide="info" class="w-4 h-4 text-indigo-400"></i>
+        <span id="toastMsg">Notification</span>
+      </div>
+    </div>
+
+    <!-- Player Controls Overlay (Bottom) -->
+    <div id="controlsWrapper" class="controls-wrapper absolute inset-0 flex flex-col justify-between p-4 pointer-events-none z-20 bg-gradient-to-t from-black/85 via-transparent to-black/30">
+      
+      <!-- Top Bar: Title & Server Badge -->
+      <div class="flex items-center justify-between pointer-events-auto">
+        <div class="flex items-center space-x-2">
+          <span class="px-2 py-0.5 rounded bg-indigo-600/80 backdrop-blur text-[10px] font-bold uppercase tracking-wider text-white">Stream API</span>
+          <span id="topMediaTitle" class="text-xs font-medium text-slate-200 truncate max-w-[280px] sm:max-w-md">Loading...</span>
+        </div>
+        <div class="flex items-center space-x-2">
+          <span id="currentSourceBadge" class="text-[11px] font-mono px-2.5 py-0.5 rounded-full bg-white/10 backdrop-blur text-slate-300 border border-white/10">
+            Resolving...
+          </span>
+        </div>
+      </div>
+
+      <!-- Bottom Bar: Timeline & Controls -->
+      <div class="space-y-2 pointer-events-auto">
+
+        <!-- Progress Timeline -->
+        <div class="flex items-center space-x-3 group/timeline">
+          <span id="timeCurrent" class="text-[11px] font-mono text-slate-300 shrink-0">00:00</span>
+          <div class="relative w-full flex items-center">
+            <input type="range" id="progressBar" min="0" max="100" value="0" step="0.1" 
+              class="custom-range w-full" oninput="handleSeek(this.value)">
+          </div>
+          <span id="timeDuration" class="text-[11px] font-mono text-slate-400 shrink-0">00:00</span>
+        </div>
+
+        <!-- Buttons Row -->
+        <div class="flex items-center justify-between pt-1">
+          
+          <!-- Left Controls (Play, Volume, Reload) -->
+          <div class="flex items-center space-x-3">
+            <!-- Play/Pause -->
+            <button onclick="togglePlay()" class="p-2 rounded-lg hover:bg-white/10 text-white transition focus:outline-none">
+              <i id="btnPlayIcon" data-lucide="play" class="w-5 h-5 fill-current"></i>
+            </button>
+
+            <!-- Volume / Mute -->
+            <div class="flex items-center space-x-2 group/vol">
+              <button onclick="toggleMute()" class="p-2 rounded-lg hover:bg-white/10 text-white transition focus:outline-none">
+                <i id="btnVolIcon" data-lucide="volume-2" class="w-5 h-5"></i>
+              </button>
+              <input type="range" id="volumeBar" min="0" max="1" step="0.05" value="1" 
+                class="custom-range w-16 opacity-75 group-hover/vol:opacity-100 transition" oninput="handleVolume(this.value)">
+            </div>
+
+            <!-- Skip Back/Forward 10s -->
+            <button onclick="seekRelative(-10)" class="p-2 rounded-lg hover:bg-white/10 text-slate-300 hover:text-white transition" title="Rewind 10s">
+              <i data-lucide="rotate-ccw" class="w-4 h-4"></i>
+            </button>
+            <button onclick="seekRelative(10)" class="p-2 rounded-lg hover:bg-white/10 text-slate-300 hover:text-white transition" title="Forward 10s">
+              <i data-lucide="rotate-cw" class="w-4 h-4"></i>
+            </button>
+          </div>
+
+          <!-- Right Controls (Servers, Subtitles, Speed, PiP, Fullscreen) -->
+          <div class="flex items-center space-x-2 text-xs">
+            
+            <!-- Server / Provider Switcher Button -->
+            <div class="relative">
+              <button onclick="toggleDropdown('serversMenu')" class="px-2.5 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-slate-200 transition flex items-center gap-1.5">
+                <i data-lucide="server" class="w-3.5 h-3.5 text-indigo-400"></i>
+                <span id="btnServerLabel" class="hidden sm:inline">Servers</span>
+                <i data-lucide="chevron-up" class="w-3.5 h-3.5"></i>
+              </button>
+
+              <!-- Servers Dropdown -->
+              <div id="serversMenu" class="absolute bottom-10 right-0 w-52 bg-slate-900/95 border border-slate-700/80 rounded-xl shadow-2xl p-2 hidden backdrop-blur-md max-h-56 overflow-y-auto">
+                <div class="px-2 py-1 text-[10px] uppercase font-bold text-slate-400 tracking-wider border-b border-slate-800">Available Servers</div>
+                <div id="serversList" class="mt-1 space-y-1"></div>
+              </div>
+            </div>
+
+            <!-- Subtitles Switcher Button -->
+            <div class="relative">
+              <button onclick="toggleDropdown('subtitlesMenu')" class="px-2.5 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-slate-200 transition flex items-center gap-1.5">
+                <i data-lucide="subtitles" class="w-3.5 h-3.5 text-indigo-400"></i>
+                <span class="hidden sm:inline">CC</span>
+              </button>
+
+              <!-- Subtitles Dropdown -->
+              <div id="subtitlesMenu" class="absolute bottom-10 right-0 w-48 bg-slate-900/95 border border-slate-700/80 rounded-xl shadow-2xl p-2 hidden backdrop-blur-md max-h-56 overflow-y-auto">
+                <div class="px-2 py-1 text-[10px] uppercase font-bold text-slate-400 tracking-wider border-b border-slate-800">Subtitles</div>
+                <div id="subtitlesList" class="mt-1 space-y-1">
+                  <button onclick="selectSubtitle('off')" class="w-full text-left px-2 py-1.5 rounded text-xs text-white hover:bg-indigo-600 transition flex items-center justify-between">
+                    <span>Off</span>
+                    <span id="ccOffCheck" class="text-indigo-400 font-bold">✓</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <!-- PiP -->
+            <button onclick="togglePiP()" class="p-2 rounded-lg hover:bg-white/10 text-slate-300 hover:text-white transition" title="Picture in Picture">
+              <i data-lucide="picture-in-picture-2" class="w-4 h-4"></i>
+            </button>
+
+            <!-- Fullscreen -->
+            <button onclick="toggleFullscreen()" class="p-2 rounded-lg hover:bg-white/10 text-slate-300 hover:text-white transition" title="Fullscreen">
+              <i id="btnFullscreenIcon" data-lucide="maximize" class="w-4 h-4"></i>
+            </button>
+
+          </div>
+
+        </div>
+
+      </div>
+
+    </div>
+
+  </div>
+
+  <script>
+    // State
+    const urlParams = new URLSearchParams(window.location.search);
+    const pathParts = window.location.pathname.replace(/^\/api\//, '/').split('/').filter(Boolean);
+
+    // Media Routing: /embed/movie/:id OR /embed/tv/:id/:s/:e OR query params (?type=movie&id=...)
+    let mediaType = urlParams.get('type') || 'movie';
+    let tmdbId = urlParams.get('id');
+    let season = urlParams.get('s') || urlParams.get('season') || 1;
+    let episode = urlParams.get('e') || urlParams.get('episode') || 1;
+    const autoplay = urlParams.get('autoplay') !== '0';
+
+    if (pathParts[1] === 'movie' && pathParts[2]) {
+      mediaType = 'movie';
+      tmdbId = pathParts[2];
+    } else if (pathParts[1] === 'tv' && pathParts[2]) {
+      mediaType = 'tv';
+      tmdbId = pathParts[2];
+      season = pathParts[3] || 1;
+      episode = pathParts[4] || 1;
+    }
+
+    const video = document.getElementById('video');
+    let hlsInstance = null;
+    let eventSource = null;
+    let sources = [];
+    let subtitles = [];
+    let currentSourceIdx = -1;
+    let isPlaying = false;
+    let activeSubtitleIdx = 'off';
+
+    // Idle Controls Auto-hide
+    let idleTimer = null;
+    const playerRoot = document.getElementById('playerRoot');
+
+    function resetIdle() {
+      playerRoot.classList.remove('idle');
+      clearTimeout(idleTimer);
+      if (isPlaying) {
+        idleTimer = setTimeout(() => {
+          playerRoot.classList.add('idle');
+          closeAllDropdowns();
+        }, 3200);
+      }
+    }
+
+    document.addEventListener('mousemove', resetIdle);
+    document.addEventListener('mousedown', resetIdle);
+    document.addEventListener('touchstart', resetIdle);
+
+    // Initialize Lucide Icons
+    lucide.createIcons();
+
+    // Start Embed Lifecycle
+    if (!tmdbId) {
+      showLoading('Missing Media ID', 'Usage: /embed/movie/:tmdbId or /embed/tv/:tmdbId/:season/:episode', false);
+    } else {
+      document.getElementById('topMediaTitle').textContent = `${mediaType.toUpperCase()} #${tmdbId} ${mediaType === 'tv' ? `(S${season}E${episode})` : ''}`;
+      initPlayback();
+    }
+
+    function initPlayback() {
+      showLoading('Searching Stream Candidates...', 'Querying providers in parallel via Server-Sent Events...', true);
+
+      const ssePath = mediaType === 'tv' 
+        ? `/tv?id=${encodeURIComponent(tmdbId)}&season=${season}&episode=${episode}`
+        : `/movie?id=${encodeURIComponent(tmdbId)}`;
+
+      eventSource = new EventSource(ssePath);
+
+      eventSource.onmessage = (e) => {
+        try {
+          const data = JSON.parse(e.data);
+          handleEvent(data);
+        } catch (err) {
+          console.error('Failed to parse SSE:', err);
+        }
+      };
+
+      eventSource.onerror = () => {
+        if (sources.length === 0) {
+          showLoading('No Playable Sources', 'All stream providers failed or timed out for this title.', false);
+        }
+        if (eventSource) eventSource.close();
+      };
+    }
+
+    function handleEvent(data) {
+      if (data.type === 'meta') {
+        if (data.meta?.title) {
+          document.getElementById('topMediaTitle').textContent = data.meta.title;
+        }
+        if (Array.isArray(data.subtitles)) {
+          subtitles = data.subtitles;
+          renderSubtitlesMenu();
+        }
+      } 
+      else if (data.type === 'source') {
+        sources.push(data.source);
+        renderServersMenu();
+
+        // Immediately start with first candidate!
+        if (currentSourceIdx === -1) {
+          playSource(0);
+        }
+      }
+      else if (data.type === 'done') {
+        if (eventSource) eventSource.close();
+        if (sources.length === 0) {
+          showLoading('No Playable Sources', 'Zero verified sources were produced for this request.', false);
+        }
+      }
+    }
+
+    function playSource(idx) {
+      if (!sources[idx]) return;
+      currentSourceIdx = idx;
+      const src = sources[idx];
+
+      document.getElementById('currentSourceBadge').textContent = src.label || src.source;
+      document.getElementById('btnServerLabel').textContent = src.label || src.source;
+      renderServersMenu();
+      hideLoading();
+
+      const streamUrl = src.url;
+      console.log('Embed playing:', src.label, streamUrl);
+
+      // Notify parent iframe
+      emitParentMessage('source_change', { source: src.source, label: src.label });
+
+      if (hlsInstance) {
+        hlsInstance.destroy();
+        hlsInstance = null;
+      }
+
+      const isHls = streamUrl.includes('.m3u8') || src.type === 'hls' || streamUrl.includes('api?url=');
+
+      if (isHls && Hls.isSupported()) {
+        hlsInstance = new Hls({
+          enableWorker: true,
+          lowLatencyMode: true,
+          backBufferLength: 90
+        });
+
+        hlsInstance.loadSource(streamUrl);
+        hlsInstance.attachMedia(video);
+
+        hlsInstance.on(Hls.Events.MANIFEST_PARSED, () => {
+          if (autoplay) video.play().catch(() => showBigPlayBtn());
+        });
+
+        hlsInstance.on(Hls.Events.ERROR, (event, data) => {
+          if (data.fatal) {
+            console.error('Fatal HLS error:', data);
+            switch (data.type) {
+              case Hls.ErrorTypes.NETWORK_ERROR:
+                triggerAutoFallback();
+                break;
+              case Hls.ErrorTypes.MEDIA_ERROR:
+                hlsInstance.recoverMediaError();
+                break;
+              default:
+                hlsInstance.destroy();
+                triggerAutoFallback();
+                break;
+            }
+          }
+        });
+      } else {
+        video.src = streamUrl;
+        if (autoplay) video.play().catch(() => showBigPlayBtn());
+        video.onerror = () => triggerAutoFallback();
+      }
+
+      showToast(`Connected: ${src.label || src.source}`);
+    }
+
+    function triggerAutoFallback() {
+      if (currentSourceIdx + 1 < sources.length) {
+        showToast(`Switching to backup server #${currentSourceIdx + 2}...`);
+        playSource(currentSourceIdx + 1);
+      } else {
+        showLoading('Playback Failed', 'Stream failed and no alternative servers are left.', false);
+      }
+    }
+
+    // Video Controls & Events
+    video.addEventListener('play', () => {
+      isPlaying = true;
+      hideBigPlayBtn();
+      updatePlayIcon(true);
+      resetIdle();
+      emitParentMessage('play');
+    });
+
+    video.addEventListener('pause', () => {
+      isPlaying = false;
+      showBigPlayBtn();
+      updatePlayIcon(false);
+      resetIdle();
+      emitParentMessage('pause');
+    });
+
+    video.addEventListener('timeupdate', () => {
+      if (!video.duration) return;
+      const cur = video.currentTime;
+      const dur = video.duration;
+      document.getElementById('timeCurrent').textContent = formatTime(cur);
+      document.getElementById('timeDuration').textContent = formatTime(dur);
+      document.getElementById('progressBar').value = (cur / dur) * 100;
+      emitParentMessage('timeupdate', { currentTime: cur, duration: dur });
+    });
+
+    video.addEventListener('ended', () => {
+      isPlaying = false;
+      showBigPlayBtn();
+      updatePlayIcon(false);
+      emitParentMessage('ended');
+    });
+
+    function togglePlay() {
+      if (video.paused || video.ended) {
+        video.play().catch(e => console.log(e));
+      } else {
+        video.pause();
+      }
+    }
+
+    function updatePlayIcon(playing) {
+      const icon = document.getElementById('btnPlayIcon');
+      icon.setAttribute('data-lucide', playing ? 'pause' : 'play');
+      lucide.createIcons();
+    }
+
+    function showBigPlayBtn() {
+      document.getElementById('bigPlayBtn').classList.remove('hidden');
+    }
+
+    function hideBigPlayBtn() {
+      document.getElementById('bigPlayBtn').classList.add('hidden');
+    }
+
+    function handleSeek(val) {
+      if (!video.duration) return;
+      video.currentTime = (parseFloat(val) / 100) * video.duration;
+    }
+
+    function seekRelative(sec) {
+      video.currentTime = Math.max(0, Math.min(video.currentTime + sec, video.duration || 0));
+    }
+
+    function handleVolume(val) {
+      video.volume = parseFloat(val);
+      video.muted = (video.volume === 0);
+      updateVolumeIcon();
+    }
+
+    function toggleMute() {
+      video.muted = !video.muted;
+      updateVolumeIcon();
+    }
+
+    function updateVolumeIcon() {
+      const icon = document.getElementById('btnVolIcon');
+      if (video.muted || video.volume === 0) {
+        icon.setAttribute('data-lucide', 'volume-x');
+      } else if (video.volume < 0.5) {
+        icon.setAttribute('data-lucide', 'volume-1');
+      } else {
+        icon.setAttribute('data-lucide', 'volume-2');
+      }
+      lucide.createIcons();
+    }
+
+    function toggleFullscreen() {
+      if (!document.fullscreenElement) {
+        playerRoot.requestFullscreen().catch(err => alert(err.message));
+      } else {
+        document.exitFullscreen();
+      }
+    }
+
+    document.addEventListener('fullscreenchange', () => {
+      const icon = document.getElementById('btnFullscreenIcon');
+      icon.setAttribute('data-lucide', document.fullscreenElement ? 'minimize' : 'maximize');
+      lucide.createIcons();
+    });
+
+    async function togglePiP() {
+      try {
+        if (document.pictureInPictureElement) {
+          await document.exitPictureInPicture();
+        } else if (document.pictureInPictureEnabled) {
+          await video.requestPictureInPicture();
+        }
+      } catch (e) {
+        console.warn('PiP error:', e);
+      }
+    }
+
+    // Keyboard Shortcuts
+    document.addEventListener('keydown', (e) => {
+      if (e.code === 'Space') {
+        e.preventDefault();
+        togglePlay();
+      } else if (e.code === 'ArrowLeft') {
+        seekRelative(-10);
+      } else if (e.code === 'ArrowRight') {
+        seekRelative(10);
+      } else if (e.code === 'KeyM') {
+        toggleMute();
+      } else if (e.code === 'KeyF') {
+        toggleFullscreen();
+      }
+    });
+
+    // Dropdowns & Menus
+    function toggleDropdown(id) {
+      const menu = document.getElementById(id);
+      const isHidden = menu.classList.contains('hidden');
+      closeAllDropdowns();
+      if (isHidden) menu.classList.remove('hidden');
+    }
+
+    function closeAllDropdowns() {
+      document.getElementById('serversMenu').classList.add('hidden');
+      document.getElementById('subtitlesMenu').classList.add('hidden');
+    }
+
+    function renderServersMenu() {
+      const list = document.getElementById('serversList');
+      list.innerHTML = '';
+      sources.forEach((src, idx) => {
+        const isCurrent = idx === currentSourceIdx;
+        const btn = document.createElement('button');
+        btn.className = `w-full text-left px-2 py-1.5 rounded text-xs transition flex items-center justify-between ${
+          isCurrent ? 'bg-indigo-600 text-white font-medium' : 'text-slate-300 hover:bg-slate-800'
+        }`;
+        btn.innerHTML = `
+          <span class="truncate">${src.label || src.source}</span>
+          <span class="text-[10px] opacity-75 font-mono">${src.quality || 'Auto'}</span>
+        `;
+        btn.onclick = () => {
+          closeAllDropdowns();
+          playSource(idx);
+        };
+        list.appendChild(btn);
+      });
+    }
+
+    function renderSubtitlesMenu() {
+      const list = document.getElementById('subtitlesList');
+      list.innerHTML = `
+        <button onclick="selectSubtitle('off')" class="w-full text-left px-2 py-1.5 rounded text-xs text-white hover:bg-slate-800 transition flex items-center justify-between">
+          <span>Off</span>
+          <span id="ccOffCheck" class="${activeSubtitleIdx === 'off' ? 'text-indigo-400 font-bold' : 'hidden'}">✓</span>
+        </button>
+      `;
+
+      subtitles.forEach((track, i) => {
+        const isCurrent = activeSubtitleIdx === i;
+        const btn = document.createElement('button');
+        btn.className = `w-full text-left px-2 py-1.5 rounded text-xs text-white hover:bg-slate-800 transition flex items-center justify-between`;
+        btn.innerHTML = `
+          <span class="truncate">${track.label || 'Track ' + (i + 1)}</span>
+          <span class="${isCurrent ? 'text-indigo-400 font-bold' : 'hidden'}">✓</span>
+        `;
+        btn.onclick = () => {
+          closeAllDropdowns();
+          selectSubtitle(i);
+        };
+        list.appendChild(btn);
+
+        // Append HTML track
+        const trackEl = document.createElement('track');
+        trackEl.kind = 'subtitles';
+        trackEl.label = track.label;
+        trackEl.src = track.file;
+        trackEl.srclang = (track.label || 'en').toLowerCase().slice(0, 2);
+        video.appendChild(trackEl);
+      });
+    }
+
+    function selectSubtitle(val) {
+      activeSubtitleIdx = val;
+      const tracks = video.textTracks;
+      for (let i = 0; i < tracks.length; i++) {
+        tracks[i].mode = (val !== 'off' && val === i) ? 'showing' : 'disabled';
+      }
+      renderSubtitlesMenu();
+      showToast(val === 'off' ? 'Subtitles off' : `Subtitle: ${subtitles[val]?.label || 'On'}`);
+    }
+
+    // UI Helpers
+    function showLoading(title, subtitle, showSpinner) {
+      const overlay = document.getElementById('loadingOverlay');
+      const spinner = document.getElementById('loadingSpinner');
+      document.getElementById('loadingTitle').textContent = title;
+      document.getElementById('loadingSubtitle').textContent = subtitle;
+
+      spinner.style.display = showSpinner ? 'block' : 'none';
+      overlay.style.opacity = '1';
+      overlay.style.pointerEvents = 'auto';
+    }
+
+    function hideLoading() {
+      const overlay = document.getElementById('loadingOverlay');
+      overlay.style.opacity = '0';
+      overlay.style.pointerEvents = 'none';
+    }
+
+    function showToast(msg) {
+      const toast = document.getElementById('embedToast');
+      document.getElementById('toastMsg').textContent = msg;
+      toast.classList.remove('opacity-0', '-translate-y-4');
+      setTimeout(() => {
+        toast.classList.add('opacity-0', '-translate-y-4');
+      }, 3000);
+    }
+
+    function formatTime(sec) {
+      sec = Math.floor(sec) || 0;
+      const m = Math.floor(sec / 60);
+      const s = sec % 60;
+      return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+    }
+
+    function emitParentMessage(event, data = {}) {
+      try {
+        if (window.parent && window.parent !== window) {
+          window.parent.postMessage({ type: 'stream_player', event, ...data }, '*');
+        }
+      } catch (e) {}
+    }
+  </script>
+</body>
+</html>

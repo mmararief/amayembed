@@ -1,0 +1,788 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Stream API — Web Player</title>
+  <link rel="icon" href="/favicon.ico">
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- HLS.js for HLS playback -->
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              50: '#eef2ff',
+              500: '#6366f1',
+              600: '#4f46e5',
+              700: '#4338ca',
+            }
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    @keyframes pulse-slow {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+    .animate-pulse-slow {
+      animation: pulse-slow 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+    }
+    /* Custom scrollbar */
+    ::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    ::-webkit-scrollbar-track {
+      background: #0f172a;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #334155;
+      border-radius: 3px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: #475569;
+    }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen font-sans antialiased flex flex-col selection:bg-indigo-500 selection:text-white">
+
+  <!-- Navbar -->
+  <header class="border-b border-slate-800/80 bg-slate-900/60 backdrop-blur-md sticky top-0 z-50">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+      <div class="flex items-center space-x-3">
+        <div class="w-9 h-9 rounded-xl bg-gradient-to-tr from-indigo-600 to-violet-500 flex items-center justify-center shadow-lg shadow-indigo-500/20">
+          <i data-lucide="play" class="w-5 h-5 text-white fill-current ml-0.5"></i>
+        </div>
+        <div>
+          <span class="font-bold text-lg tracking-tight bg-gradient-to-r from-white via-slate-200 to-indigo-200 bg-clip-text text-transparent">Stream API</span>
+          <span class="text-xs px-2 py-0.5 rounded-full bg-indigo-500/10 text-indigo-400 font-medium ml-2 border border-indigo-500/20">Player v2.0</span>
+        </div>
+      </div>
+      <div class="flex items-center space-x-3 text-xs">
+        <div id="serverStatusBadge" class="flex items-center space-x-1.5 px-3 py-1.5 rounded-full bg-slate-800 border border-slate-700">
+          <span class="w-2 h-2 rounded-full bg-amber-400 animate-ping" id="statusDot"></span>
+          <span id="serverStatusText" class="text-slate-300">Checking API...</span>
+        </div>
+        <a href="/health" target="_blank" class="text-slate-400 hover:text-white transition flex items-center gap-1 hover:underline">
+          <i data-lucide="activity" class="w-3.5 h-3.5"></i> Health
+        </a>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Container -->
+  <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 flex-1 w-full space-y-6">
+
+    <!-- Search & Control Panel -->
+    <div class="bg-slate-900/80 border border-slate-800 rounded-2xl p-5 shadow-xl backdrop-blur-sm">
+      <form id="streamForm" class="space-y-4" onsubmit="event.preventDefault(); startStream();">
+        <div class="flex flex-wrap items-center justify-between gap-4 border-b border-slate-800 pb-4">
+          
+          <!-- Media Type Tabs -->
+          <div class="flex p-1 bg-slate-950 rounded-xl border border-slate-800 text-xs font-medium">
+            <button type="button" id="tabMovie" onclick="setMediaType('movie')" class="px-4 py-2 rounded-lg bg-indigo-600 text-white shadow transition flex items-center gap-1.5">
+              <i data-lucide="film" class="w-4 h-4"></i> Movie
+            </button>
+            <button type="button" id="tabTv" onclick="setMediaType('tv')" class="px-4 py-2 rounded-lg text-slate-400 hover:text-white transition flex items-center gap-1.5">
+              <i data-lucide="tv" class="w-4 h-4"></i> TV Series
+            </button>
+          </div>
+
+          <!-- Quick Presets -->
+          <div class="flex flex-wrap items-center gap-2 text-xs">
+            <span class="text-slate-400 font-medium">Quick Pick:</span>
+            <button type="button" onclick="loadPreset(155, 'movie')" class="px-2.5 py-1 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-200 transition border border-slate-700">The Dark Knight (155)</button>
+            <button type="button" onclick="loadPreset(550, 'movie')" class="px-2.5 py-1 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-200 transition border border-slate-700">Fight Club (550)</button>
+            <button type="button" onclick="loadPreset(1396, 'tv', 1, 1)" class="px-2.5 py-1 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-200 transition border border-slate-700">Breaking Bad S1E1</button>
+            <button type="button" onclick="loadPreset(94605, 'tv', 1, 1)" class="px-2.5 py-1 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-200 transition border border-slate-700">Arcane S1E1</button>
+          </div>
+        </div>
+
+        <!-- Inputs Row -->
+        <div class="grid grid-cols-1 md:grid-cols-12 gap-4 items-end">
+          
+          <!-- TMDB ID or Search -->
+          <div class="md:col-span-6 relative">
+            <label class="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-1.5 flex items-center justify-between">
+              <span>TMDB ID or Title Search</span>
+              <span id="titleSearchStatus" class="text-indigo-400 font-normal lowercase hidden">searching...</span>
+            </label>
+            <div class="relative">
+              <input type="text" id="inputQuery" placeholder="e.g. 155 or search title..." 
+                class="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition pl-10"
+                autocomplete="off" />
+              <i data-lucide="search" class="w-4 h-4 text-slate-500 absolute left-3.5 top-3"></i>
+            </div>
+
+            <!-- Instant Search Suggestions Dropdown -->
+            <div id="searchDropdown" class="absolute left-0 right-0 mt-2 bg-slate-900 border border-slate-700 rounded-xl shadow-2xl z-40 max-h-64 overflow-y-auto hidden">
+              <ul id="searchList" class="divide-y divide-slate-800 text-sm"></ul>
+            </div>
+          </div>
+
+          <!-- TV Season (hidden if movie) -->
+          <div id="seasonField" class="md:col-span-2 hidden">
+            <label class="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-1.5">Season</label>
+            <input type="number" id="inputSeason" min="1" value="1" 
+              class="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition" />
+          </div>
+
+          <!-- TV Episode (hidden if movie) -->
+          <div id="episodeField" class="md:col-span-2 hidden">
+            <label class="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-1.5">Episode</label>
+            <input type="number" id="inputEpisode" min="1" value="1" 
+              class="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition" />
+          </div>
+
+          <!-- Submit Button -->
+          <div class="md:col-span-2 flex gap-2">
+            <button type="submit" id="btnPlay" 
+              class="w-full py-2.5 px-4 bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white font-medium text-sm rounded-xl shadow-lg shadow-indigo-600/25 transition duration-150 flex items-center justify-center gap-2">
+              <i data-lucide="play" class="w-4 h-4 fill-current"></i>
+              <span>Stream</span>
+            </button>
+          </div>
+        </div>
+      </form>
+    </div>
+
+    <!-- Video Player & Sidebar Grid -->
+    <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+
+      <!-- Left: Player Column (8 cols) -->
+      <div class="lg:col-span-8 space-y-4">
+        
+        <!-- Video Wrapper -->
+        <div class="relative bg-black rounded-2xl overflow-hidden border border-slate-800 aspect-video shadow-2xl flex items-center justify-center group">
+          <video id="videoElement" class="w-full h-full object-contain" controls playsinline crossorigin="anonymous"></video>
+
+          <!-- Loading & Fallback Overlay -->
+          <div id="playerOverlay" class="absolute inset-0 bg-slate-950/90 backdrop-blur-sm flex flex-col items-center justify-center p-6 text-center z-20">
+            <div id="overlaySpinner" class="w-12 h-12 border-4 border-indigo-500/20 border-t-indigo-500 rounded-full animate-spin mb-4"></div>
+            <i id="overlayIcon" data-lucide="film" class="w-12 h-12 text-slate-600 mb-4 hidden"></i>
+            <h3 id="overlayTitle" class="text-base font-semibold text-white">Stream API Web Player</h3>
+            <p id="overlayMessage" class="text-sm text-slate-400 mt-1 max-w-md">Select or search a title above and click Stream to begin streaming candidates in real-time.</p>
+          </div>
+        </div>
+
+        <!-- Video Metadata & Controls Bar -->
+        <div class="bg-slate-900/60 border border-slate-800/80 rounded-xl p-4 flex flex-wrap items-center justify-between gap-4">
+          <div class="flex items-center space-x-3">
+            <div class="p-2.5 rounded-lg bg-indigo-500/10 text-indigo-400">
+              <i data-lucide="info" class="w-5 h-5"></i>
+            </div>
+            <div>
+              <h2 id="mediaTitleDisplay" class="font-bold text-white text-base">No Media Loaded</h2>
+              <p id="mediaSubDisplay" class="text-xs text-slate-400">TMDB ID: —</p>
+            </div>
+          </div>
+
+          <!-- Subtitle Dropdown -->
+          <div class="flex items-center space-x-2">
+            <label class="text-xs text-slate-400 font-medium flex items-center gap-1">
+              <i data-lucide="subtitles" class="w-4 h-4 text-slate-400"></i> Subtitles:
+            </label>
+            <select id="subtitleSelect" onchange="switchSubtitle(this.value)" 
+              class="bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-indigo-500 transition max-w-[160px]">
+              <option value="off">Off</option>
+            </select>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Right: Live Discovery & Sources Sidebar (4 cols) -->
+      <div class="lg:col-span-4 space-y-4">
+        
+        <!-- Stream Discovery Card -->
+        <div class="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 shadow-xl flex flex-col h-[520px]">
+          
+          <!-- Card Header -->
+          <div class="flex items-center justify-between border-b border-slate-800 pb-3 mb-3">
+            <div class="flex items-center space-x-2">
+              <i data-lucide="radio" class="w-4 h-4 text-indigo-400 animate-pulse"></i>
+              <h3 class="font-bold text-sm text-white">Stream Candidates</h3>
+            </div>
+            <span id="sourceCountBadge" class="text-xs px-2 py-0.5 rounded-full bg-slate-800 text-slate-400 border border-slate-700 font-mono">0 found</span>
+          </div>
+
+          <!-- Live SSE Status Indicator -->
+          <div id="sseStatusContainer" class="mb-3 px-3 py-2 rounded-xl bg-slate-950 border border-slate-800/80 text-xs flex items-center justify-between">
+            <span id="sseStatusLabel" class="text-slate-400 flex items-center gap-1.5">
+              <span class="w-2 h-2 rounded-full bg-slate-600" id="sseIndicator"></span>
+              Idle
+            </span>
+            <span id="activeSourceLabel" class="text-indigo-400 font-mono font-medium truncate max-w-[140px] text-right">None</span>
+          </div>
+
+          <!-- Sources Scrollable List -->
+          <div class="flex-1 overflow-y-auto space-y-2 pr-1" id="sourcesList">
+            <div class="text-center py-12 text-slate-500 text-xs">
+              <i data-lucide="list-video" class="w-8 h-8 mx-auto mb-2 opacity-40"></i>
+              <span>Verified sources will appear here as they are discovered via SSE.</span>
+            </div>
+          </div>
+
+          <!-- Card Footer Tabs -->
+          <div class="border-t border-slate-800 pt-3 mt-3 flex items-center justify-between text-xs text-slate-400">
+            <button type="button" onclick="showDownloadsModal()" class="hover:text-white transition flex items-center gap-1">
+              <i data-lucide="download" class="w-3.5 h-3.5"></i> Direct Downloads
+            </button>
+            <button type="button" onclick="copyActiveStreamUrl()" class="hover:text-white transition flex items-center gap-1">
+              <i data-lucide="copy" class="w-3.5 h-3.5"></i> Copy Stream URL
+            </button>
+          </div>
+
+        </div>
+
+      </div>
+
+    </div>
+
+  </main>
+
+  <!-- Downloads Modal -->
+  <div id="downloadsModal" class="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4 hidden">
+    <div class="bg-slate-900 border border-slate-800 rounded-2xl max-w-lg w-full p-6 shadow-2xl space-y-4">
+      <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+        <h3 class="font-bold text-white text-base flex items-center gap-2">
+          <i data-lucide="download-cloud" class="w-5 h-5 text-indigo-400"></i> Direct Download Candidates
+        </h3>
+        <button onclick="closeDownloadsModal()" class="text-slate-400 hover:text-white"><i data-lucide="x" class="w-5 h-5"></i></button>
+      </div>
+      <div id="downloadsList" class="space-y-2 max-h-60 overflow-y-auto text-xs pr-1">
+        <p class="text-slate-500 text-center py-6">Loading download candidates...</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Notification Toast -->
+  <div id="toast" class="fixed bottom-6 right-6 z-50 transform translate-y-20 opacity-0 transition duration-300 pointer-events-none">
+    <div class="bg-slate-900 border border-slate-700 text-white text-xs px-4 py-3 rounded-xl shadow-2xl flex items-center gap-3">
+      <i id="toastIcon" data-lucide="check-circle" class="w-4 h-4 text-emerald-400"></i>
+      <span id="toastMessage">Notification</span>
+    </div>
+  </div>
+
+  <script>
+    // State
+    let currentMediaType = 'movie';
+    let currentTmdbId = null;
+    let currentSeason = 1;
+    let currentEpisode = 1;
+    let eventSource = null;
+    let hlsInstance = null;
+    let discoveredSources = [];
+    let discoveredSubtitles = [];
+    let activeSource = null;
+    let activeSourceIndex = -1;
+
+    const video = document.getElementById('videoElement');
+
+    // Initialize Lucide Icons
+    lucide.createIcons();
+
+    // Check Backend Server Status on Load
+    async function checkServerStatus() {
+      const dot = document.getElementById('statusDot');
+      const text = document.getElementById('serverStatusText');
+      try {
+        const res = await fetch('/health');
+        if (res.ok) {
+          const data = await res.json();
+          dot.className = 'w-2 h-2 rounded-full bg-emerald-500';
+          text.textContent = data.tmdb ? 'API Online & TMDB Ready' : 'API Online (No TMDB)';
+        } else {
+          dot.className = 'w-2 h-2 rounded-full bg-amber-500';
+          text.textContent = 'API Status Degraded';
+        }
+      } catch (err) {
+        dot.className = 'w-2 h-2 rounded-full bg-red-500';
+        text.textContent = 'API Offline';
+      }
+    }
+    checkServerStatus();
+
+    // Toggle Media Type
+    function setMediaType(type) {
+      currentMediaType = type;
+      const tabMovie = document.getElementById('tabMovie');
+      const tabTv = document.getElementById('tabTv');
+      const seasonField = document.getElementById('seasonField');
+      const episodeField = document.getElementById('episodeField');
+
+      if (type === 'movie') {
+        tabMovie.className = 'px-4 py-2 rounded-lg bg-indigo-600 text-white shadow transition flex items-center gap-1.5';
+        tabTv.className = 'px-4 py-2 rounded-lg text-slate-400 hover:text-white transition flex items-center gap-1.5';
+        seasonField.classList.add('hidden');
+        episodeField.classList.add('hidden');
+      } else {
+        tabTv.className = 'px-4 py-2 rounded-lg bg-indigo-600 text-white shadow transition flex items-center gap-1.5';
+        tabMovie.className = 'px-4 py-2 rounded-lg text-slate-400 hover:text-white transition flex items-center gap-1.5';
+        seasonField.classList.remove('hidden');
+        episodeField.classList.remove('hidden');
+      }
+    }
+
+    // Quick Presets
+    function loadPreset(id, type, s = 1, e = 1) {
+      setMediaType(type);
+      document.getElementById('inputQuery').value = id;
+      if (type === 'tv') {
+        document.getElementById('inputSeason').value = s;
+        document.getElementById('inputEpisode').value = e;
+      }
+      startStream();
+    }
+
+    // Debounced Search by Title
+    let searchTimeout;
+    const inputQuery = document.getElementById('inputQuery');
+    const searchDropdown = document.getElementById('searchDropdown');
+    const searchList = document.getElementById('searchList');
+    const titleSearchStatus = document.getElementById('titleSearchStatus');
+
+    inputQuery.addEventListener('input', (e) => {
+      const val = e.target.value.trim();
+      clearTimeout(searchTimeout);
+
+      if (!val || /^\d+$/.test(val)) {
+        searchDropdown.classList.add('hidden');
+        titleSearchStatus.classList.add('hidden');
+        return;
+      }
+
+      titleSearchStatus.classList.remove('hidden');
+      searchTimeout = setTimeout(async () => {
+        try {
+          const res = await fetch(`/api?tmdb_search=1&type=${currentMediaType}&q=${encodeURIComponent(val)}`);
+          if (res.ok) {
+            const data = await res.json();
+            renderSearchResults(data.results || []);
+          }
+        } catch (err) {
+          console.error('Search failed:', err);
+        } finally {
+          titleSearchStatus.classList.add('hidden');
+        }
+      }, 350);
+    });
+
+    function renderSearchResults(results) {
+      searchList.innerHTML = '';
+      if (!results.length) {
+        searchList.innerHTML = '<li class="px-4 py-3 text-xs text-slate-500 text-center">No titles found.</li>';
+        searchDropdown.classList.remove('hidden');
+        return;
+      }
+
+      results.slice(0, 5).forEach(item => {
+        const title = item.title || item.name;
+        const year = (item.release_date || item.first_air_date || '').slice(0, 4);
+        const li = document.createElement('li');
+        li.className = 'px-4 py-2.5 hover:bg-slate-800 cursor-pointer flex items-center justify-between transition';
+        li.innerHTML = `
+          <div>
+            <div class="font-medium text-white">${title} ${year ? `<span class="text-slate-400 text-xs">(${year})</span>` : ''}</div>
+            <div class="text-[11px] text-slate-500">TMDB ID: ${item.id}</div>
+          </div>
+          <span class="text-xs text-indigo-400 font-mono">Select</span>
+        `;
+        li.onclick = () => {
+          inputQuery.value = item.id;
+          searchDropdown.classList.add('hidden');
+          startStream();
+        };
+        searchList.appendChild(li);
+      });
+      searchDropdown.classList.remove('hidden');
+    }
+
+    document.addEventListener('click', (e) => {
+      if (!searchDropdown.contains(e.target) && e.target !== inputQuery) {
+        searchDropdown.classList.add('hidden');
+      }
+    });
+
+    // Start Streaming
+    function startStream() {
+      const rawInput = inputQuery.value.trim();
+      if (!rawInput) {
+        showToast('Please enter a TMDB ID or title.', 'error');
+        return;
+      }
+
+      currentTmdbId = rawInput;
+      currentSeason = parseInt(document.getElementById('inputSeason').value) || 1;
+      currentEpisode = parseInt(document.getElementById('inputEpisode').value) || 1;
+
+      // Reset State
+      closeEventStream();
+      discoveredSources = [];
+      discoveredSubtitles = [];
+      activeSource = null;
+      activeSourceIndex = -1;
+      renderSourcesList();
+
+      // UI Reset
+      document.getElementById('sourceCountBadge').textContent = '0 found';
+      updateSseStatus('searching', 'Connecting to providers...');
+      showPlayerOverlay('Searching Sources...', 'Querying active providers in parallel via Server-Sent Events...', true);
+
+      // Determine SSE URL
+      const sseUrl = currentMediaType === 'tv'
+        ? `/tv?id=${encodeURIComponent(currentTmdbId)}&season=${currentSeason}&episode=${currentEpisode}`
+        : `/movie?id=${encodeURIComponent(currentTmdbId)}`;
+
+      document.getElementById('mediaTitleDisplay').textContent = `Loading ${currentMediaType.toUpperCase()} #${currentTmdbId}...`;
+      document.getElementById('mediaSubDisplay').textContent = currentMediaType === 'tv' 
+        ? `TMDB ID: ${currentTmdbId} | S${currentSeason} E${currentEpisode}` 
+        : `TMDB ID: ${currentTmdbId}`;
+
+      // Open SSE Connection
+      eventSource = new EventSource(sseUrl);
+
+      eventSource.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          handleSseEvent(data);
+        } catch (err) {
+          console.error('Failed to parse SSE line:', err);
+        }
+      };
+
+      eventSource.onerror = (err) => {
+        console.warn('SSE connection ended or closed:', err);
+        if (discoveredSources.length === 0) {
+          updateSseStatus('failed', 'Connection closed');
+          showPlayerOverlay('No Sources Found', 'Providers finished with no playable streams.', false);
+        } else {
+          updateSseStatus('done', 'Discovery finished');
+        }
+        closeEventStream();
+      };
+    }
+
+    function handleSseEvent(data) {
+      if (data.type === 'meta') {
+        if (data.meta?.title) {
+          document.getElementById('mediaTitleDisplay').textContent = data.meta.title;
+        }
+        if (Array.isArray(data.subtitles)) {
+          discoveredSubtitles = data.subtitles;
+          populateSubtitles(discoveredSubtitles);
+        }
+      } 
+      else if (data.type === 'source') {
+        const sourceItem = data.source;
+        discoveredSources.push(sourceItem);
+        document.getElementById('sourceCountBadge').textContent = `${discoveredSources.length} found`;
+        renderSourcesList();
+
+        // Auto-play first source immediately!
+        if (!activeSource) {
+          playSource(0);
+        }
+      } 
+      else if (data.type === 'done') {
+        updateSseStatus('done', `Finished (${data.total} sources)`);
+        closeEventStream();
+        if (discoveredSources.length === 0) {
+          showPlayerOverlay('No Playable Sources', 'None of the providers returned playable streams for this title.', false);
+        }
+      }
+    }
+
+    function playSource(index) {
+      if (!discoveredSources[index]) return;
+
+      activeSourceIndex = index;
+      activeSource = discoveredSources[index];
+      document.getElementById('activeSourceLabel').textContent = activeSource.label || activeSource.source;
+
+      renderSourcesList();
+      hidePlayerOverlay();
+
+      const streamUrl = activeSource.url;
+      console.log('Starting playback:', activeSource.label, streamUrl);
+
+      // Clean up previous HLS instance
+      if (hlsInstance) {
+        hlsInstance.destroy();
+        hlsInstance = null;
+      }
+
+      const isHls = streamUrl.includes('.m3u8') || activeSource.type === 'hls' || streamUrl.includes('api?url=');
+
+      if (isHls && Hls.isSupported()) {
+        hlsInstance = new Hls({
+          enableWorker: true,
+          lowLatencyMode: true,
+          backBufferLength: 90
+        });
+
+        hlsInstance.loadSource(streamUrl);
+        hlsInstance.attachMedia(video);
+
+        hlsInstance.on(Hls.Events.MANIFEST_PARSED, () => {
+          video.play().catch(e => console.log('Autoplay blocked:', e));
+        });
+
+        hlsInstance.on(Hls.Events.ERROR, (event, data) => {
+          if (data.fatal) {
+            console.error('Fatal HLS error encountered:', data);
+            switch (data.type) {
+              case Hls.ErrorTypes.NETWORK_ERROR:
+                console.log('Network error, attempting next fallback source...');
+                autoFallbackNext();
+                break;
+              case Hls.ErrorTypes.MEDIA_ERROR:
+                hlsInstance.recoverMediaError();
+                break;
+              default:
+                hlsInstance.destroy();
+                autoFallbackNext();
+                break;
+            }
+          }
+        });
+      } else {
+        // Direct MP4 / native playback
+        video.src = streamUrl;
+        video.play().catch(e => console.log('Autoplay blocked:', e));
+
+        video.onerror = () => {
+          console.warn('Video tag error, falling back to next source...');
+          autoFallbackNext();
+        };
+      }
+
+      showToast(`Playing: ${activeSource.label || activeSource.source}`);
+    }
+
+    function autoFallbackNext() {
+      if (activeSourceIndex + 1 < discoveredSources.length) {
+        showToast(`Switching to backup source #${activeSourceIndex + 2}...`, 'info');
+        playSource(activeSourceIndex + 1);
+      } else {
+        showPlayerOverlay('Playback Failed', 'Stream failed and no additional fallback sources are available.', false);
+      }
+    }
+
+    function renderSourcesList() {
+      const container = document.getElementById('sourcesList');
+      if (!discoveredSources.length) {
+        container.innerHTML = `
+          <div class="text-center py-12 text-slate-500 text-xs">
+            <i data-lucide="list-video" class="w-8 h-8 mx-auto mb-2 opacity-40"></i>
+            <span>Verified sources will appear here as they are discovered via SSE.</span>
+          </div>
+        `;
+        lucide.createIcons();
+        return;
+      }
+
+      container.innerHTML = '';
+      discoveredSources.forEach((src, idx) => {
+        const isActive = idx === activeSourceIndex;
+        const div = document.createElement('div');
+        div.className = `p-3 rounded-xl border text-xs cursor-pointer transition flex items-center justify-between ${
+          isActive 
+            ? 'bg-indigo-600/15 border-indigo-500/50 shadow-sm text-white' 
+            : 'bg-slate-950 border-slate-800 text-slate-300 hover:border-slate-700 hover:bg-slate-900/60'
+        }`;
+        div.onclick = () => playSource(idx);
+
+        div.innerHTML = `
+          <div class="flex items-center space-x-2.5 overflow-hidden">
+            <div class="w-7 h-7 rounded-lg flex items-center justify-center shrink-0 ${
+              isActive ? 'bg-indigo-600 text-white' : 'bg-slate-800 text-slate-400'
+            }">
+              <i data-lucide="${isActive ? 'volume-2' : 'play'}" class="w-3.5 h-3.5"></i>
+            </div>
+            <div class="truncate">
+              <div class="font-semibold truncate">${src.label || src.source}</div>
+              <div class="text-[10px] text-slate-500 uppercase tracking-wider">${src.source} • ${src.type || 'HLS'}</div>
+            </div>
+          </div>
+          <div class="flex items-center space-x-2 shrink-0">
+            ${src.quality ? `<span class="px-2 py-0.5 rounded bg-slate-800 border border-slate-700 font-mono text-[10px] text-slate-300">${src.quality}</span>` : ''}
+            ${isActive ? '<span class="text-[10px] font-bold text-indigo-400 uppercase tracking-wider">ACTIVE</span>' : ''}
+          </div>
+        `;
+        container.appendChild(div);
+      });
+
+      lucide.createIcons();
+    }
+
+    function populateSubtitles(tracks) {
+      const select = document.getElementById('subtitleSelect');
+      select.innerHTML = '<option value="off">Off</option>';
+
+      // Remove existing custom track elements
+      while (video.getElementsByTagName('track').length > 0) {
+        video.removeChild(video.getElementsByTagName('track')[0]);
+      }
+
+      tracks.forEach((track, i) => {
+        const opt = document.createElement('option');
+        opt.value = i;
+        opt.textContent = `${track.label || 'Subtitle'} (${track.source || 'v1'})`;
+        select.appendChild(opt);
+
+        // Add track element
+        const trackEl = document.createElement('track');
+        trackEl.kind = 'subtitles';
+        trackEl.label = track.label || `Track ${i + 1}`;
+        trackEl.src = track.file;
+        trackEl.srclang = (track.label || 'en').toLowerCase().slice(0, 2);
+        video.appendChild(trackEl);
+      });
+    }
+
+    function switchSubtitle(val) {
+      const tracks = video.textTracks;
+      for (let i = 0; i < tracks.length; i++) {
+        tracks[i].mode = (val !== 'off' && parseInt(val) === i) ? 'showing' : 'disabled';
+      }
+      showToast(val === 'off' ? 'Subtitles disabled' : `Subtitle switched to track #${parseInt(val) + 1}`);
+    }
+
+    function updateSseStatus(state, message) {
+      const label = document.getElementById('sseStatusLabel');
+      const indicator = document.getElementById('sseIndicator');
+
+      if (state === 'searching') {
+        indicator.className = 'w-2 h-2 rounded-full bg-indigo-400 animate-ping';
+        label.innerHTML = `<span class="w-2 h-2 rounded-full bg-indigo-500 animate-pulse"></span> Searching candidates...`;
+      } else if (state === 'done') {
+        indicator.className = 'w-2 h-2 rounded-full bg-emerald-400';
+        label.innerHTML = `<span class="w-2 h-2 rounded-full bg-emerald-500"></span> ${message}`;
+      } else {
+        indicator.className = 'w-2 h-2 rounded-full bg-slate-600';
+        label.innerHTML = `<span class="w-2 h-2 rounded-full bg-slate-600"></span> ${message}`;
+      }
+    }
+
+    function showPlayerOverlay(title, msg, showSpinner) {
+      const overlay = document.getElementById('playerOverlay');
+      const spinner = document.getElementById('overlaySpinner');
+      const icon = document.getElementById('overlayIcon');
+      document.getElementById('overlayTitle').textContent = title;
+      document.getElementById('overlayMessage').textContent = msg;
+
+      if (showSpinner) {
+        spinner.classList.remove('hidden');
+        icon.classList.add('hidden');
+      } else {
+        spinner.classList.add('hidden');
+        icon.classList.remove('hidden');
+      }
+      overlay.classList.remove('hidden');
+      lucide.createIcons();
+    }
+
+    function hidePlayerOverlay() {
+      document.getElementById('playerOverlay').classList.add('hidden');
+    }
+
+    function closeEventStream() {
+      if (eventSource) {
+        eventSource.close();
+        eventSource = null;
+      }
+    }
+
+    // Modal Downloads
+    async function showDownloadsModal() {
+      if (!currentTmdbId) {
+        showToast('Please search or start a stream first.', 'error');
+        return;
+      }
+      const modal = document.getElementById('downloadsModal');
+      const list = document.getElementById('downloadsList');
+      modal.classList.remove('hidden');
+      list.innerHTML = '<p class="text-slate-400 text-center py-6">Fetching direct download links...</p>';
+
+      const dlUrl = currentMediaType === 'tv'
+        ? `/downloads/tv/${currentTmdbId}/${currentSeason}/${currentEpisode}`
+        : `/downloads/movie/${currentTmdbId}`;
+
+      try {
+        const res = await fetch(dlUrl);
+        const data = await res.json();
+        const items = Array.isArray(data) ? data : (data.value || []);
+
+        if (!items.length) {
+          list.innerHTML = '<p class="text-slate-500 text-center py-6">No direct download links found for this title.</p>';
+          return;
+        }
+
+        list.innerHTML = '';
+        items.forEach(dl => {
+          const row = document.createElement('div');
+          row.className = 'p-3 bg-slate-950 border border-slate-800 rounded-xl flex items-center justify-between gap-3';
+          row.innerHTML = `
+            <div class="truncate">
+              <div class="font-semibold text-white truncate">${dl.label || dl.source || 'Direct Video'}</div>
+              <div class="text-[11px] text-slate-500">${dl.quality || 'Direct'} • ${dl.format || 'MP4'} ${dl.size ? `• ${dl.size}` : ''}</div>
+            </div>
+            <div class="flex items-center gap-2 shrink-0">
+              <a href="${dl.url}" target="_blank" download class="px-2.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-xs transition">Download</a>
+              <button onclick="navigator.clipboard.writeText('${dl.url}'); showToast('URL copied!');" class="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300"><i data-lucide="copy" class="w-4 h-4"></i></button>
+            </div>
+          `;
+          list.appendChild(row);
+        });
+        lucide.createIcons();
+      } catch (err) {
+        list.innerHTML = `<p class="text-red-400 text-center py-6">Failed to load downloads: ${err.message}</p>`;
+      }
+    }
+
+    function closeDownloadsModal() {
+      document.getElementById('downloadsModal').classList.add('hidden');
+    }
+
+    function copyActiveStreamUrl() {
+      if (!activeSource) {
+        showToast('No active stream playing.', 'error');
+        return;
+      }
+      navigator.clipboard.writeText(activeSource.url);
+      showToast('Active stream URL copied to clipboard!');
+    }
+
+    // Toast Notification System
+    function showToast(msg, type = 'success') {
+      const toast = document.getElementById('toast');
+      const text = document.getElementById('toastMessage');
+      const icon = document.getElementById('toastIcon');
+
+      text.textContent = msg;
+      if (type === 'error') {
+        icon.className = 'w-4 h-4 text-red-400';
+      } else if (type === 'info') {
+        icon.className = 'w-4 h-4 text-indigo-400';
+      } else {
+        icon.className = 'w-4 h-4 text-emerald-400';
+      }
+
+      toast.classList.remove('translate-y-20', 'opacity-0');
+      setTimeout(() => {
+        toast.classList.add('translate-y-20', 'opacity-0');
+      }, 3000);
+    }
+  </script>
+</body>
+</html>
