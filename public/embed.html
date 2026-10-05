@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>AmayStream — Custom Player</title>
+  <title>AmayStream Player</title>
   <link rel="icon" href="/favicon.ico">
   <!-- Tailwind CSS CDN -->
   <script src="https://cdn.tailwindcss.com"></script>
@@ -12,13 +12,11 @@
   <!-- Lucide Icons -->
   <script src="https://unpkg.com/lucide@latest"></script>
   <style>
-    @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap');
-
     * {
       box-sizing: border-box;
       user-select: none;
       -webkit-user-select: none;
-      font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     }
     body, html {
       margin: 0;
@@ -26,107 +24,27 @@
       width: 100%;
       height: 100%;
       overflow: hidden;
-      background-color: #030712;
+      background-color: #000;
       color: #fff;
     }
     video::-webkit-media-controls {
       display: none !important;
     }
-    .controls-panel {
-      transition: opacity 0.3s cubic-bezier(0.16, 1, 0.3, 1), transform 0.3s cubic-bezier(0.16, 1, 0.3, 1);
-    }
-    .idle .controls-panel {
+    .idle .controls-bar {
       opacity: 0 !important;
+      transform: translateY(12px) !important;
       pointer-events: none !important;
-      transform: translateY(8px);
     }
     .idle {
       cursor: none !important;
     }
-
-    /* Scrubber Progress */
-    .progress-track {
-      position: relative;
-      height: 5px;
-      border-radius: 9999px;
-      background: rgba(255, 255, 255, 0.18);
-      cursor: pointer;
-      transition: height 0.15s ease;
-    }
-    .progress-track:hover {
-      height: 8px;
-    }
-    .progress-buffer {
-      position: absolute;
-      top: 0;
-      left: 0;
-      height: 100%;
-      border-radius: 9999px;
-      background: rgba(255, 255, 255, 0.35);
-      width: 0%;
-      transition: width 0.2s linear;
-    }
-    .progress-played {
-      position: absolute;
-      top: 0;
-      left: 0;
-      height: 100%;
-      border-radius: 9999px;
-      background: linear-gradient(90deg, #6366f1, #8b5cf6, #ec4899);
-      box-shadow: 0 0 12px rgba(139, 92, 246, 0.6);
-      width: 0%;
-    }
-    .progress-thumb {
-      position: absolute;
-      right: -6px;
-      top: 50%;
-      transform: translateY(-50%) scale(0);
-      width: 14px;
-      height: 14px;
-      border-radius: 50%;
-      background: #fff;
-      box-shadow: 0 0 10px rgba(168, 85, 247, 0.9);
-      transition: transform 0.15s cubic-bezier(0.175, 0.885, 0.32, 1.275);
-    }
-    .progress-track:hover .progress-thumb {
-      transform: translateY(-50%) scale(1);
-    }
-
     /* Subtitle Styling */
     video::cue {
-      background: rgba(0, 0, 0, 0.8) !important;
+      background: rgba(0, 0, 0, 0.75) !important;
       color: #fff !important;
-      font-size: 1.15rem !important;
-      font-weight: 500 !important;
-      line-height: 1.4 !important;
-      border-radius: 6px !important;
-      padding: 3px 8px !important;
-      text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
-    }
-
-    /* Volume Slider */
-    .vol-slider {
-      -webkit-appearance: none;
-      height: 4px;
-      border-radius: 9999px;
-      background: rgba(255, 255, 255, 0.25);
-      outline: none;
-      cursor: pointer;
-    }
-    .vol-slider::-webkit-slider-thumb {
-      -webkit-appearance: none;
-      width: 10px;
-      height: 10px;
-      border-radius: 50%;
-      background: #fff;
-      cursor: pointer;
-    }
-
-    .glass-modal {
-      background: rgba(13, 17, 28, 0.92);
-      backdrop-filter: blur(20px);
-      -webkit-backdrop-filter: blur(20px);
-      border: 1px solid rgba(255, 255, 255, 0.1);
+      font-size: 1.1rem !important;
+      border-radius: 4px !important;
+      padding: 2px 6px !important;
     }
   </style>
 </head>
@@ -137,183 +55,123 @@
     <!-- 1. Native HTML5 <video> Engine -->
     <video id="video" class="w-full h-full object-contain cursor-pointer" playsinline crossorigin="anonymous"></video>
 
-    <!-- Tap / Click Overlay for Double-Tap Skip and Play/Pause -->
-    <div id="gestureOverlay" class="absolute inset-0 z-10 grid grid-cols-3 cursor-pointer">
-      <div id="touchLeft" class="h-full"></div>
-      <div id="touchCenter" class="h-full"></div>
-      <div id="touchRight" class="h-full"></div>
+    <!-- Loading Spinner -->
+    <div id="loadingOverlay" class="absolute inset-0 flex items-center justify-center bg-black/60 backdrop-blur-[2px] z-30 pointer-events-none transition-opacity duration-300">
+      <div class="w-12 h-12 border-3 border-white/20 border-t-white rounded-full animate-spin"></div>
     </div>
 
-    <!-- Center Ripple Action Indicator -->
-    <div id="rippleIndicator" class="absolute z-30 pointer-events-none flex flex-col items-center justify-center hidden">
-      <div class="w-20 h-20 rounded-full bg-black/60 backdrop-blur-md border border-white/10 flex items-center justify-center text-white shadow-2xl">
-        <i id="rippleIcon" data-lucide="play" class="w-10 h-10 fill-current"></i>
-      </div>
-      <span id="rippleText" class="mt-2 text-xs font-semibold tracking-wider text-slate-200"></span>
-    </div>
-
-    <!-- Loading / Searching Screen -->
-    <div id="loadingOverlay" class="absolute inset-0 flex flex-col items-center justify-center bg-black/80 backdrop-blur-sm z-30 transition-all duration-300">
-      <div class="relative flex items-center justify-center mb-4">
-        <div class="w-16 h-16 rounded-full border-4 border-indigo-500/20 border-t-indigo-500 animate-spin"></div>
-        <div class="absolute w-8 h-8 rounded-full bg-indigo-600/30 blur-md animate-pulse"></div>
-      </div>
-      <h3 id="loadingTitle" class="text-sm font-semibold tracking-wider text-slate-100 uppercase">Finding Best Stream</h3>
-      <p id="loadingSubtitle" class="text-xs text-slate-400 mt-1 max-w-xs text-center font-mono">Querying multi-provider SSE pipeline...</p>
-    </div>
-
-    <!-- Notification Toast -->
-    <div id="toast" class="absolute top-5 right-5 z-40 transition-all duration-300 opacity-0 transform -translate-y-3 pointer-events-none">
-      <div class="px-4 py-2.5 rounded-xl glass-modal text-xs text-white shadow-2xl flex items-center gap-2.5 border border-white/10">
-        <i id="toastIcon" data-lucide="sparkles" class="w-4 h-4 text-indigo-400 shrink-0"></i>
-        <span id="toastMsg" class="font-medium">Stream connected</span>
-      </div>
-    </div>
-
-    <!-- Hover Time Tooltip for Scrubber -->
-    <div id="scrubTooltip" class="absolute bottom-20 z-40 bg-slate-900/95 text-[11px] font-mono px-2 py-1 rounded text-white border border-slate-700 pointer-events-none opacity-0 transition-opacity duration-150 transform -translate-x-1/2">
-      00:00
-    </div>
-
-    <!-- TOP BAR CONTROLS -->
-    <div id="topBar" class="controls-panel absolute top-0 left-0 right-0 p-4 sm:p-5 flex items-center justify-between z-20 pointer-events-none bg-gradient-to-b from-black/80 via-black/30 to-transparent">
-      <div class="flex items-center space-x-3 pointer-events-auto">
-        <div class="w-8 h-8 rounded-xl bg-indigo-600 flex items-center justify-center shadow-lg shadow-indigo-600/30">
-          <i data-lucide="film" class="w-4 h-4 text-white"></i>
-        </div>
-        <div>
-          <h1 id="mediaTitle" class="text-xs sm:text-sm font-bold text-white tracking-wide truncate max-w-[200px] sm:max-w-md">Loading Title...</h1>
-          <p id="mediaSubtitle" class="text-[10px] text-slate-400 font-mono">TMDB: —</p>
-        </div>
-      </div>
-
-      <div class="flex items-center space-x-2 pointer-events-auto">
-        <button onclick="toggleModal('serversModal')" class="flex items-center space-x-2 px-3 py-1.5 rounded-full glass-modal hover:bg-white/10 text-xs transition border border-white/10">
-          <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" id="serverPulse"></span>
-          <span id="topServerLabel" class="text-[11px] font-medium text-slate-200">Auto Server</span>
-          <i data-lucide="chevron-down" class="w-3.5 h-3.5 text-slate-400"></i>
+    <!-- 2. EXACT BOTTOM PILL CONTROLS (MATCHING SCREENSHOT) -->
+    <div class="controls-bar absolute bottom-3 left-4 right-4 sm:left-6 sm:right-6 z-20 transition-all duration-300 pointer-events-auto">
+      <div class="bg-black/60 hover:bg-black/75 backdrop-blur-md border border-white/10 rounded-xl px-3.5 py-2.5 flex items-center gap-3 text-white text-xs shadow-2xl transition-colors">
+        
+        <!-- Play / Pause -->
+        <button id="btnPlay" onclick="togglePlay()" class="p-1 rounded-md hover:text-white text-slate-200 transition active:scale-95 focus:outline-none">
+          <i id="playIcon" data-lucide="play" class="w-4 h-4 fill-current ml-0.5"></i>
         </button>
-      </div>
-    </div>
 
-    <!-- BOTTOM BAR CONTROLS -->
-    <div id="bottomBar" class="controls-panel absolute bottom-0 left-0 right-0 p-4 sm:p-5 flex flex-col justify-end space-y-3 z-20 pointer-events-none bg-gradient-to-t from-black/90 via-black/40 to-transparent">
-      
-      <!-- Interactive Scrubber Timeline -->
-      <div class="w-full pointer-events-auto py-2">
-        <div id="progressTrack" class="progress-track">
-          <div id="progressBuffer" class="progress-buffer"></div>
-          <div id="progressPlayed" class="progress-played">
-            <div class="progress-thumb"></div>
+        <!-- Volume Speaker with Expandable Slider -->
+        <div id="volumeWrapper" class="flex items-center gap-1.5 group/vol">
+          <button onclick="toggleMute()" class="p-1 rounded-md hover:text-white text-slate-200 transition focus:outline-none">
+            <i id="volIcon" data-lucide="volume-2" class="w-4 h-4"></i>
+          </button>
+          <div class="w-0 overflow-hidden group-hover/vol:w-16 transition-all duration-200 flex items-center">
+            <input type="range" id="volSlider" min="0" max="1" step="0.05" value="1" 
+              class="w-14 h-1 bg-white/30 rounded-full cursor-pointer accent-white" oninput="setVolume(this.value)">
           </div>
         </div>
-      </div>
 
-      <!-- Controls Row -->
-      <div class="flex items-center justify-between pointer-events-auto">
-        
-        <!-- Left: Play/Pause, Skip, Volume, Time -->
-        <div class="flex items-center space-x-2 sm:space-x-3">
-          <button id="btnPlay" onclick="togglePlay()" class="p-2 rounded-xl hover:bg-white/10 text-white transition active:scale-95 focus:outline-none">
-            <i id="playIcon" data-lucide="play" class="w-5 h-5 fill-current"></i>
+        <!-- Current Time -->
+        <span id="currentTimeText" class="font-mono text-[11px] text-slate-200 tracking-tight shrink-0">0:00</span>
+
+        <!-- Scrubber Progress Bar -->
+        <div id="progressTrack" class="relative flex-1 h-1 hover:h-1.5 bg-white/20 rounded-full cursor-pointer transition-all duration-150 group/scrub">
+          <div id="progressBuffer" class="absolute top-0 left-0 h-full rounded-full bg-white/30" style="width: 0%;"></div>
+          <div id="progressPlayed" class="absolute top-0 left-0 h-full rounded-full bg-white flex items-center justify-end" style="width: 0%;">
+            <div class="w-2.5 h-2.5 bg-white rounded-full scale-0 group-hover/scrub:scale-100 transition-transform shadow-md"></div>
+          </div>
+        </div>
+
+        <!-- Remaining Time -->
+        <button id="btnTimeToggle" onclick="toggleTimeDisplay()" class="font-mono text-[11px] text-slate-300 hover:text-white tracking-tight shrink-0 transition">
+          -0:00
+        </button>
+
+        <!-- Settings Cog (Gear) -->
+        <div class="relative">
+          <button onclick="toggleMenu('settingsMenu')" class="p-1 rounded-md text-slate-300 hover:text-white transition focus:outline-none">
+            <i data-lucide="settings" class="w-4 h-4"></i>
           </button>
 
-          <button onclick="skipTime(-10)" class="p-2 rounded-xl hover:bg-white/10 text-slate-300 hover:text-white transition active:scale-95" title="Rewind 10s">
-            <i data-lucide="rotate-ccw" class="w-4 h-4"></i>
-          </button>
-
-          <button onclick="skipTime(10)" class="p-2 rounded-xl hover:bg-white/10 text-slate-300 hover:text-white transition active:scale-95" title="Forward 10s">
-            <i data-lucide="rotate-cw" class="w-4 h-4"></i>
-          </button>
-
-          <!-- Volume Controls with Expandable Slider -->
-          <div class="flex items-center space-x-2 group/volume relative">
-            <button onclick="toggleMute()" class="p-2 rounded-xl hover:bg-white/10 text-white transition focus:outline-none">
-              <i id="volIcon" data-lucide="volume-2" class="w-5 h-5"></i>
+          <!-- Settings Popover -->
+          <div id="settingsMenu" class="absolute bottom-11 right-0 w-52 bg-slate-950/95 border border-white/10 rounded-xl p-2 shadow-2xl text-xs space-y-1 backdrop-blur-xl hidden">
+            <button onclick="openSubmenu('serversSubmenu')" class="w-full px-2.5 py-2 rounded-lg hover:bg-white/10 flex items-center justify-between text-slate-200 transition">
+              <span class="flex items-center gap-2">
+                <i data-lucide="server" class="w-3.5 h-3.5 text-slate-400"></i>
+                <span>Server</span>
+              </span>
+              <div class="flex items-center gap-1 text-[11px] text-slate-400">
+                <span id="activeServerName" class="truncate max-w-[80px]">Auto</span>
+                <i data-lucide="chevron-right" class="w-3 h-3"></i>
+              </div>
             </button>
-            <div class="w-0 overflow-hidden group-hover/volume:w-20 transition-all duration-200 flex items-center">
-              <input type="range" id="volBar" min="0" max="1" step="0.05" value="1" class="vol-slider w-16" oninput="setVolume(this.value)">
+
+            <button onclick="openSubmenu('speedSubmenu')" class="w-full px-2.5 py-2 rounded-lg hover:bg-white/10 flex items-center justify-between text-slate-200 transition">
+              <span class="flex items-center gap-2">
+                <i data-lucide="gauge" class="w-3.5 h-3.5 text-slate-400"></i>
+                <span>Speed</span>
+              </span>
+              <div class="flex items-center gap-1 text-[11px] text-slate-400">
+                <span id="speedValueText">1x</span>
+                <i data-lucide="chevron-right" class="w-3 h-3"></i>
+              </div>
+            </button>
+          </div>
+
+          <!-- Servers Submenu -->
+          <div id="serversSubmenu" class="absolute bottom-11 right-0 w-64 bg-slate-950/95 border border-white/10 rounded-xl p-2 shadow-2xl text-xs space-y-1 backdrop-blur-xl hidden max-h-56 overflow-y-auto">
+            <div class="text-[10px] uppercase font-bold text-slate-400 px-2 py-1 border-b border-white/10">Select Server</div>
+            <div id="serversListContainer" class="space-y-1 mt-1"></div>
+          </div>
+
+          <!-- Speed Submenu -->
+          <div id="speedSubmenu" class="absolute bottom-11 right-0 w-40 bg-slate-950/95 border border-white/10 rounded-xl p-2 shadow-2xl text-xs space-y-1 backdrop-blur-xl hidden">
+            <div class="text-[10px] uppercase font-bold text-slate-400 px-2 py-1 border-b border-white/10">Playback Speed</div>
+            <div class="space-y-0.5 mt-1">
+              <button onclick="setSpeed(0.5)" class="w-full px-2.5 py-1.5 rounded-lg flex items-center justify-between text-slate-300 hover:bg-white/10"><span>0.5x</span></button>
+              <button onclick="setSpeed(0.75)" class="w-full px-2.5 py-1.5 rounded-lg flex items-center justify-between text-slate-300 hover:bg-white/10"><span>0.75x</span></button>
+              <button onclick="setSpeed(1.0)" class="w-full px-2.5 py-1.5 rounded-lg flex items-center justify-between text-white font-semibold bg-white/15"><span>1.0x (Normal)</span></button>
+              <button onclick="setSpeed(1.25)" class="w-full px-2.5 py-1.5 rounded-lg flex items-center justify-between text-slate-300 hover:bg-white/10"><span>1.25x</span></button>
+              <button onclick="setSpeed(1.5)" class="w-full px-2.5 py-1.5 rounded-lg flex items-center justify-between text-slate-300 hover:bg-white/10"><span>1.5x</span></button>
+              <button onclick="setSpeed(2.0)" class="w-full px-2.5 py-1.5 rounded-lg flex items-center justify-between text-slate-300 hover:bg-white/10"><span>2.0x</span></button>
             </div>
           </div>
+        </div>
 
-          <!-- Time Display -->
-          <div class="text-[11px] font-mono text-slate-300 pl-1">
-            <span id="curTimeText">00:00</span>
-            <span class="text-slate-500"> / </span>
-            <span id="durTimeText" class="text-slate-400">00:00</span>
+        <!-- Subtitles CC Button -->
+        <div class="relative">
+          <button onclick="toggleMenu('subtitlesMenu')" class="p-1 rounded-md text-slate-300 hover:text-white transition focus:outline-none">
+            <i data-lucide="subtitles" class="w-4 h-4"></i>
+          </button>
+
+          <div id="subtitlesMenu" class="absolute bottom-11 right-0 w-56 bg-slate-950/95 border border-white/10 rounded-xl p-2 shadow-2xl text-xs space-y-1 backdrop-blur-xl hidden max-h-56 overflow-y-auto">
+            <div class="text-[10px] uppercase font-bold text-slate-400 px-2 py-1 border-b border-white/10">Subtitles</div>
+            <button onclick="selectSubtitle('off')" class="w-full px-2.5 py-1.5 rounded-lg flex items-center justify-between text-white font-semibold bg-white/15">
+              <span>Off</span>
+            </button>
+            <div id="subtitlesListContainer" class="space-y-1 mt-1"></div>
           </div>
         </div>
 
-        <!-- Right: Server, Subtitles, Speed, PiP, Fullscreen -->
-        <div class="flex items-center space-x-1.5 sm:space-x-2">
-          
-          <button onclick="toggleModal('serversModal')" class="px-2.5 py-1.5 rounded-xl hover:bg-white/10 text-slate-200 transition flex items-center gap-1.5 text-xs border border-white/5 active:scale-95">
-            <i data-lucide="server" class="w-4 h-4 text-indigo-400"></i>
-            <span id="btnServersCount" class="hidden md:inline font-medium">Servers</span>
-          </button>
+        <!-- PiP -->
+        <button onclick="togglePiP()" class="p-1 rounded-md hover:text-white text-slate-300 transition focus:outline-none">
+          <i data-lucide="picture-in-picture-2" class="w-4 h-4"></i>
+        </button>
 
-          <button onclick="toggleModal('subtitlesModal')" class="px-2.5 py-1.5 rounded-xl hover:bg-white/10 text-slate-200 transition flex items-center gap-1.5 text-xs border border-white/5 active:scale-95">
-            <i data-lucide="subtitles" class="w-4 h-4 text-indigo-400"></i>
-            <span class="hidden md:inline font-medium">CC</span>
-          </button>
+        <!-- Fullscreen -->
+        <button onclick="toggleFullscreen()" class="p-1 rounded-md hover:text-white text-slate-300 transition focus:outline-none">
+          <i id="fullscreenIcon" data-lucide="maximize" class="w-4 h-4"></i>
+        </button>
 
-          <button onclick="toggleModal('speedModal')" class="px-2 py-1.5 rounded-xl hover:bg-white/10 text-slate-200 transition text-xs font-mono font-medium border border-white/5 active:scale-95">
-            <span id="speedLabel">1x</span>
-          </button>
-
-          <button onclick="togglePiP()" class="p-2 rounded-xl hover:bg-white/10 text-slate-300 hover:text-white transition active:scale-95">
-            <i data-lucide="picture-in-picture-2" class="w-4 h-4"></i>
-          </button>
-
-          <button onclick="toggleFullscreen()" class="p-2 rounded-xl hover:bg-white/10 text-slate-300 hover:text-white transition active:scale-95">
-            <i id="fullscreenIcon" data-lucide="maximize" class="w-4 h-4"></i>
-          </button>
-
-        </div>
-
-      </div>
-
-    </div>
-
-    <!-- MODAL: SERVERS -->
-    <div id="serversModal" class="absolute bottom-20 right-4 sm:right-8 w-72 glass-modal rounded-2xl p-4 shadow-2xl z-40 hidden border border-white/10">
-      <div class="flex items-center justify-between border-b border-white/10 pb-2 mb-2">
-        <div class="flex items-center gap-2">
-          <i data-lucide="server" class="w-4 h-4 text-indigo-400"></i>
-          <span class="text-xs font-bold uppercase tracking-wider text-slate-200">Available Servers</span>
-        </div>
-        <button onclick="closeModals()" class="text-slate-400 hover:text-white"><i data-lucide="x" class="w-4 h-4"></i></button>
-      </div>
-      <div id="serversList" class="space-y-1.5 max-h-56 overflow-y-auto pr-1"></div>
-    </div>
-
-    <!-- MODAL: SUBTITLES -->
-    <div id="subtitlesModal" class="absolute bottom-20 right-4 sm:right-8 w-80 glass-modal rounded-2xl p-4 shadow-2xl z-40 hidden border border-white/10">
-      <div class="flex items-center justify-between border-b border-white/10 pb-2 mb-2">
-        <div class="flex items-center gap-2">
-          <i data-lucide="subtitles" class="w-4 h-4 text-indigo-400"></i>
-          <span class="text-xs font-bold uppercase tracking-wider text-slate-200">Subtitles / CC</span>
-        </div>
-        <button onclick="closeModals()" class="text-slate-400 hover:text-white"><i data-lucide="x" class="w-4 h-4"></i></button>
-      </div>
-      <div class="relative mb-2">
-        <input type="text" id="subSearchInput" placeholder="Filter language..." 
-          class="w-full bg-slate-950/70 border border-white/10 rounded-lg px-2.5 py-1.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500" 
-          oninput="renderSubtitlesList(this.value)">
-      </div>
-      <div id="subtitlesList" class="space-y-1 max-h-52 overflow-y-auto pr-1"></div>
-    </div>
-
-    <!-- MODAL: SPEED -->
-    <div id="speedModal" class="absolute bottom-20 right-4 sm:right-24 w-44 glass-modal rounded-2xl p-3 shadow-2xl z-40 hidden border border-white/10">
-      <div class="text-[11px] font-bold uppercase tracking-wider text-slate-400 border-b border-white/10 pb-2 mb-2">Speed</div>
-      <div class="space-y-1">
-        <button onclick="setSpeed(0.5)" class="speed-opt w-full text-left px-2.5 py-1.5 rounded-lg text-xs hover:bg-white/10 flex justify-between"><span>0.5x</span></button>
-        <button onclick="setSpeed(0.75)" class="speed-opt w-full text-left px-2.5 py-1.5 rounded-lg text-xs hover:bg-white/10 flex justify-between"><span>0.75x</span></button>
-        <button onclick="setSpeed(1.0)" class="speed-opt w-full text-left px-2.5 py-1.5 rounded-lg text-xs hover:bg-white/10 flex justify-between font-bold text-indigo-400"><span>1.0x (Normal)</span><i data-lucide="check" class="w-3.5 h-3.5"></i></button>
-        <button onclick="setSpeed(1.25)" class="speed-opt w-full text-left px-2.5 py-1.5 rounded-lg text-xs hover:bg-white/10 flex justify-between"><span>1.25x</span></button>
-        <button onclick="setSpeed(1.5)" class="speed-opt w-full text-left px-2.5 py-1.5 rounded-lg text-xs hover:bg-white/10 flex justify-between"><span>1.5x</span></button>
-        <button onclick="setSpeed(2.0)" class="speed-opt w-full text-left px-2.5 py-1.5 rounded-lg text-xs hover:bg-white/10 flex justify-between"><span>2.0x</span></button>
       </div>
     </div>
 
@@ -348,19 +206,21 @@
     let currentIdx = -1;
     let activeSubIdx = 'off';
     let isPlaying = false;
-    let isScrubbing = false;
     let hasStarted = false;
+    let showRemaining = true;
+
+    lucide.createIcons();
 
     // Auto-hide controls
     let idleTimer = null;
     function resetIdle() {
       playerRoot.classList.remove('idle');
       clearTimeout(idleTimer);
-      if (isPlaying && !isScrubbing) {
+      if (isPlaying) {
         idleTimer = setTimeout(() => {
           playerRoot.classList.add('idle');
-          closeModals();
-        }, 2800);
+          closeAllMenus();
+        }, 2600);
       }
     }
 
@@ -368,18 +228,11 @@
     document.addEventListener('mousedown', resetIdle);
     document.addEventListener('touchstart', resetIdle);
 
-    lucide.createIcons();
-
-    if (!tmdbId) {
-      showLoading('No Media Specified', 'Usage: /embed/movie/:tmdbId or /embed?id=:tmdbId', false);
-    } else {
-      document.getElementById('mediaSubtitle').textContent = `TMDB #${tmdbId} ${mediaType === 'tv' ? `• S${season} E${episode}` : ''}`;
+    if (tmdbId) {
       initStreaming();
     }
 
     function initStreaming() {
-      showLoading('Finding Best Stream', 'Querying parallel SSE providers...', true);
-
       const ssePath = mediaType === 'tv'
         ? `/tv?id=${encodeURIComponent(tmdbId)}&season=${season}&episode=${episode}`
         : `/movie?id=${encodeURIComponent(tmdbId)}`;
@@ -390,9 +243,6 @@
         try {
           const data = JSON.parse(e.data);
           if (data.type === 'meta') {
-            if (data.meta?.title) {
-              document.getElementById('mediaTitle').textContent = data.meta.title;
-            }
             if (Array.isArray(data.subtitles)) {
               subtitles = data.subtitles;
               renderSubtitlesList();
@@ -401,44 +251,34 @@
             sources.push(data.source);
             renderServersList();
 
-            // Auto-start immediately on first source!
             if (!hasStarted) {
               hasStarted = true;
               playSource(0);
             }
           } else if (data.type === 'done') {
             eventSource.close();
-            if (sources.length === 0) {
-              showLoading('No Playable Sources', 'All stream providers returned 0 candidates.', false);
-            }
           }
         } catch (err) {
-          console.error('SSE Error:', err);
+          console.error(err);
         }
       };
 
       eventSource.onerror = () => {
-        if (sources.length === 0) {
-          showLoading('Stream Offline', 'Unable to reach backend Stream API.', false);
-        }
         if (eventSource) eventSource.close();
       };
     }
 
-    // CORE ENGINE: Native <video> + Hls.js only if HLS
+    // Engine: native <video> + Hls.js only if HLS
     function playSource(idx) {
       if (!sources[idx]) return;
       currentIdx = idx;
       const src = sources[idx];
 
-      document.getElementById('topServerLabel').textContent = src.label || src.source;
+      document.getElementById('activeServerName').textContent = src.label || src.source;
       renderServersList();
 
       const streamUrl = src.url;
       const isHls = streamUrl.includes('.m3u8') || src.type === 'hls' || streamUrl.includes('api?url=');
-
-      console.log(`[Custom Player] Playing source #${idx + 1}: ${src.label || src.source} (isHls: ${isHls})`);
-      showToast(`Connected: ${src.label || src.source}`);
 
       if (hls) {
         hls.destroy();
@@ -446,187 +286,88 @@
       }
 
       if (isHls && Hls.isSupported()) {
-        // 1. ENGINE: HLS.js for HLS streams on non-Safari
-        hls = new Hls({
-          enableWorker: true,
-          lowLatencyMode: true,
-          backBufferLength: 90
-        });
-
+        hls = new Hls({ enableWorker: true, lowLatencyMode: true, backBufferLength: 90 });
         hls.loadSource(streamUrl);
         hls.attachMedia(video);
-
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
           hideLoading();
           if (autoplay) video.play().catch(() => {});
         });
-
         hls.on(Hls.Events.ERROR, (_, data) => {
-          if (data.fatal) {
-            console.warn('[Custom Player] HLS fatal error, falling back...', data);
-            triggerFallback();
-          }
+          if (data.fatal) triggerFallback();
         });
       } else {
-        // 2. ENGINE: Native <video> for MP4/MKV or Safari native HLS
         video.src = streamUrl;
         video.load();
-
         video.onloadeddata = () => {
           hideLoading();
           if (autoplay) video.play().catch(() => {});
         };
-
-        video.onerror = () => {
-          console.warn('[Custom Player] Native video error, falling back...');
-          triggerFallback();
-        };
+        video.onerror = () => triggerFallback();
       }
     }
 
     function triggerFallback() {
       if (currentIdx + 1 < sources.length) {
-        showToast(`Server failed. Trying backup #${currentIdx + 2}...`);
         playSource(currentIdx + 1);
-      } else {
-        showLoading('Playback Failed', 'All candidate servers exhausted.', false);
       }
     }
 
-    // Video Events
-    video.addEventListener('play', () => {
-      isPlaying = true;
-      updatePlayBtn(true);
-      resetIdle();
-    });
-
-    video.addEventListener('pause', () => {
-      isPlaying = false;
-      updatePlayBtn(false);
-      resetIdle();
-    });
-
-    video.addEventListener('timeupdate', () => {
-      if (isScrubbing || !video.duration) return;
-      const cur = video.currentTime;
-      const dur = video.duration;
-      document.getElementById('curTimeText').textContent = formatTime(cur);
-      document.getElementById('durTimeText').textContent = formatTime(dur);
-      document.getElementById('progressPlayed').style.width = `${(cur / dur) * 100}%`;
-
-      if (video.buffered.length > 0) {
-        const bufferedEnd = video.buffered.end(video.buffered.length - 1);
-        document.getElementById('progressBuffer').style.width = `${(bufferedEnd / dur) * 100}%`;
-      }
-    });
-
-    // Scrubber Dragging
-    const track = document.getElementById('progressTrack');
-    const scrubTooltip = document.getElementById('scrubTooltip');
-
-    track.addEventListener('mousemove', (e) => {
-      if (!video.duration) return;
-      const rect = track.getBoundingClientRect();
-      const pos = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-      const hoverTime = pos * video.duration;
-      scrubTooltip.textContent = formatTime(hoverTime);
-      scrubTooltip.style.left = `${e.clientX}px`;
-      scrubTooltip.style.opacity = '1';
-    });
-
-    track.addEventListener('mouseleave', () => {
-      if (!isScrubbing) scrubTooltip.style.opacity = '0';
-    });
-
-    track.addEventListener('mousedown', (e) => {
-      isScrubbing = true;
-      handleScrub(e);
-      const onMove = (ev) => handleScrub(ev);
-      const onUp = () => {
-        isScrubbing = false;
-        scrubTooltip.style.opacity = '0';
-        document.removeEventListener('mousemove', onMove);
-        document.removeEventListener('mouseup', onUp);
-      };
-      document.addEventListener('mousemove', onMove);
-      document.addEventListener('mouseup', onUp);
-    });
-
-    function handleScrub(e) {
-      if (!video.duration) return;
-      const rect = track.getBoundingClientRect();
-      const pos = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-      video.currentTime = pos * video.duration;
-      document.getElementById('progressPlayed').style.width = `${pos * 100}%`;
-    }
-
-    // Double-Tap Skip
-    let clickTimer = null;
-    let lastTapSide = null;
-
-    document.getElementById('touchLeft').addEventListener('click', () => handleTap('left'));
-    document.getElementById('touchCenter').addEventListener('click', () => handleTap('center'));
-    document.getElementById('touchRight').addEventListener('click', () => handleTap('right'));
-
-    function handleTap(side) {
-      if (clickTimer && lastTapSide === side) {
-        clearTimeout(clickTimer);
-        clickTimer = null;
-        if (side === 'left') {
-          skipTime(-10);
-          showRipple('rewind', '-10s');
-        } else if (side === 'right') {
-          skipTime(10);
-          showRipple('forward', '+10s');
-        } else {
-          toggleFullscreen();
-        }
-      } else {
-        lastTapSide = side;
-        clickTimer = setTimeout(() => {
-          clickTimer = null;
-          if (side === 'center') {
-            togglePlay();
-            showRipple(video.paused ? 'pause' : 'play');
-          } else {
-            resetIdle();
-          }
-        }, 250);
-      }
-    }
-
-    function showRipple(type, text = '') {
-      const el = document.getElementById('rippleIndicator');
-      const icon = document.getElementById('rippleIcon');
-      const textEl = document.getElementById('rippleText');
-
-      if (type === 'rewind') icon.setAttribute('data-lucide', 'rotate-ccw');
-      else if (type === 'forward') icon.setAttribute('data-lucide', 'rotate-cw');
-      else if (type === 'play') icon.setAttribute('data-lucide', 'play');
-      else icon.setAttribute('data-lucide', 'pause');
-
-      textEl.textContent = text;
-      lucide.createIcons();
-
-      el.classList.remove('hidden');
-      setTimeout(() => el.classList.add('hidden'), 450);
-    }
-
+    // Play / Pause
     function togglePlay() {
       if (video.paused) video.play().catch(() => {});
       else video.pause();
     }
 
-    function updatePlayBtn(playing) {
-      const icon = document.getElementById('playIcon');
-      icon.setAttribute('data-lucide', playing ? 'pause' : 'play');
+    video.addEventListener('play', () => {
+      isPlaying = true;
+      document.getElementById('playIcon').setAttribute('data-lucide', 'pause');
       lucide.createIcons();
+      resetIdle();
+    });
+
+    video.addEventListener('pause', () => {
+      isPlaying = false;
+      document.getElementById('playIcon').setAttribute('data-lucide', 'play');
+      lucide.createIcons();
+      resetIdle();
+    });
+
+    video.addEventListener('click', togglePlay);
+
+    // Time & Scrubber
+    video.addEventListener('timeupdate', () => {
+      if (!video.duration) return;
+      const cur = video.currentTime;
+      const dur = video.duration;
+      document.getElementById('currentTimeText').textContent = formatTime(cur);
+
+      if (showRemaining) {
+        document.getElementById('btnTimeToggle').textContent = `-${formatTime(Math.max(0, dur - cur))}`;
+      } else {
+        document.getElementById('btnTimeToggle').textContent = formatTime(dur);
+      }
+
+      document.getElementById('progressPlayed').style.width = `${(cur / dur) * 100}%`;
+
+      if (video.buffered.length > 0) {
+        const buf = video.buffered.end(video.buffered.length - 1);
+        document.getElementById('progressBuffer').style.width = `${(buf / dur) * 100}%`;
+      }
+    });
+
+    function toggleTimeDisplay() {
+      showRemaining = !showRemaining;
     }
 
-    function skipTime(sec) {
-      video.currentTime = Math.max(0, Math.min(video.currentTime + sec, video.duration || 0));
-    }
+    document.getElementById('progressTrack').addEventListener('click', (e) => {
+      if (!video.duration) return;
+      const rect = e.currentTarget.getBoundingClientRect();
+      const pos = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+      video.currentTime = pos * video.duration;
+    });
 
+    // Volume
     function setVolume(val) {
       video.volume = parseFloat(val);
       video.muted = (video.volume === 0);
@@ -646,19 +387,7 @@
       lucide.createIcons();
     }
 
-    function setSpeed(val) {
-      video.playbackRate = val;
-      document.getElementById('speedLabel').textContent = `${val}x`;
-      document.querySelectorAll('.speed-opt').forEach(btn => {
-        btn.classList.remove('font-bold', 'text-indigo-400');
-        if (btn.textContent.includes(`${val}x`)) {
-          btn.classList.add('font-bold', 'text-indigo-400');
-        }
-      });
-      closeModals();
-      showToast(`Playback speed: ${val}x`);
-    }
-
+    // Fullscreen & PiP
     function toggleFullscreen() {
       if (!document.fullscreenElement) {
         playerRoot.requestFullscreen().catch(() => {});
@@ -667,6 +396,12 @@
       }
     }
 
+    document.addEventListener('fullscreenchange', () => {
+      const icon = document.getElementById('fullscreenIcon');
+      icon.setAttribute('data-lucide', document.fullscreenElement ? 'minimize' : 'maximize');
+      lucide.createIcons();
+    });
+
     async function togglePiP() {
       try {
         if (document.pictureInPictureElement) await document.exitPictureInPicture();
@@ -674,77 +409,77 @@
       } catch (e) {}
     }
 
-    function toggleModal(id) {
-      const modal = document.getElementById(id);
-      const isHidden = modal.classList.contains('hidden');
-      closeModals();
-      if (isHidden) modal.classList.remove('hidden');
+    // Menus
+    function toggleMenu(id) {
+      const menu = document.getElementById(id);
+      const isHidden = menu.classList.contains('hidden');
+      closeAllMenus();
+      if (isHidden) menu.classList.remove('hidden');
     }
 
-    function closeModals() {
-      document.getElementById('serversModal').classList.add('hidden');
-      document.getElementById('subtitlesModal').classList.add('hidden');
-      document.getElementById('speedModal').classList.add('hidden');
+    function openSubmenu(id) {
+      document.getElementById('settingsMenu').classList.add('hidden');
+      document.getElementById(id).classList.remove('hidden');
     }
 
-    function renderServersList() {
-      const list = document.getElementById('serversList');
-      list.innerHTML = '';
-      document.getElementById('btnServersCount').textContent = `Servers (${sources.length})`;
-
-      sources.forEach((src, i) => {
-        const isCurrent = i === currentIdx;
-        const btn = document.createElement('button');
-        btn.className = `w-full text-left px-3 py-2 rounded-xl text-xs transition flex items-center justify-between ${
-          isCurrent ? 'bg-indigo-600 text-white font-semibold shadow-md' : 'text-slate-300 hover:bg-white/10'
-        }`;
-        btn.innerHTML = `
-          <div class="flex items-center space-x-2 truncate">
-            <span class="w-1.5 h-1.5 rounded-full ${isCurrent ? 'bg-white' : 'bg-indigo-400'}"></span>
-            <span class="truncate">${src.label || src.source}</span>
-          </div>
-          <span class="text-[10px] font-mono px-1.5 py-0.5 rounded bg-black/40 border border-white/10">${src.quality || 'Auto'}</span>
-        `;
-        btn.onclick = () => {
-          closeModals();
-          playSource(i);
-        };
-        list.appendChild(btn);
+    function closeAllMenus() {
+      ['settingsMenu', 'serversSubmenu', 'speedSubmenu', 'subtitlesMenu'].forEach(id => {
+        document.getElementById(id).classList.add('hidden');
       });
     }
 
-    function renderSubtitlesList(filter = '') {
-      const list = document.getElementById('subtitlesList');
-      list.innerHTML = `
-        <button onclick="selectSubtitle('off')" class="w-full text-left px-2.5 py-1.5 rounded-lg text-xs hover:bg-white/10 flex justify-between ${activeSubIdx === 'off' ? 'text-indigo-400 font-bold' : 'text-slate-300'}">
-          <span>Off</span>
-          ${activeSubIdx === 'off' ? '<i data-lucide="check" class="w-3.5 h-3.5"></i>' : ''}
-        </button>
-      `;
+    document.addEventListener('click', (e) => {
+      if (!e.target.closest('.controls-bar')) {
+        closeAllMenus();
+      }
+    });
 
-      subtitles.forEach((track, i) => {
-        const label = track.label || `Track ${i + 1}`;
-        if (filter && !label.toLowerCase().includes(filter.toLowerCase())) return;
+    function setSpeed(val) {
+      video.playbackRate = val;
+      document.getElementById('speedValueText').textContent = `${val}x`;
+      closeAllMenus();
+    }
 
-        const isCurrent = activeSubIdx === i;
+    function renderServersList() {
+      const container = document.getElementById('serversListContainer');
+      container.innerHTML = '';
+      sources.forEach((src, i) => {
         const btn = document.createElement('button');
-        btn.className = `w-full text-left px-2.5 py-1.5 rounded-lg text-xs hover:bg-white/10 flex justify-between ${isCurrent ? 'text-indigo-400 font-bold' : 'text-slate-300'}`;
+        btn.className = `w-full px-2.5 py-1.5 rounded-lg flex items-center justify-between transition ${
+          i === currentIdx ? 'bg-white/15 text-white font-medium' : 'text-slate-300 hover:bg-white/10'
+        }`;
         btn.innerHTML = `
-          <span class="truncate">${label}</span>
-          ${isCurrent ? '<i data-lucide="check" class="w-3.5 h-3.5"></i>' : ''}
+          <span class="truncate">${src.label || src.source}</span>
+          <span class="text-[10px] text-slate-400 font-mono">${src.quality || 'Auto'}</span>
         `;
-        btn.onclick = () => selectSubtitle(i);
-        list.appendChild(btn);
+        btn.onclick = () => {
+          playSource(i);
+          closeAllMenus();
+        };
+        container.appendChild(btn);
+      });
+    }
+
+    function renderSubtitlesList() {
+      const container = document.getElementById('subtitlesListContainer');
+      container.innerHTML = '';
+      subtitles.forEach((track, i) => {
+        const btn = document.createElement('button');
+        btn.className = 'w-full px-2.5 py-1.5 rounded-lg flex items-center justify-between truncate text-slate-300 hover:bg-white/10 transition';
+        btn.innerHTML = `<span class="truncate">${track.label || 'Track ' + (i + 1)}</span>`;
+        btn.onclick = () => {
+          selectSubtitle(i);
+          closeAllMenus();
+        };
+        container.appendChild(btn);
 
         const trackEl = document.createElement('track');
         trackEl.kind = 'subtitles';
-        trackEl.label = label;
+        trackEl.label = track.label;
         trackEl.src = track.file;
         trackEl.srclang = (track.label || 'en').toLowerCase().slice(0, 2);
         video.appendChild(trackEl);
       });
-
-      lucide.createIcons();
     }
 
     function selectSubtitle(val) {
@@ -753,39 +488,19 @@
       for (let i = 0; i < tracks.length; i++) {
         tracks[i].mode = (val !== 'off' && val === i) ? 'showing' : 'disabled';
       }
-      renderSubtitlesList();
-      closeModals();
-      showToast(val === 'off' ? 'Subtitles off' : `Subtitles: ${subtitles[val]?.label || 'Active'}`);
-    }
-
-    function showLoading(title, subtitle, showSpinner) {
-      const el = document.getElementById('loadingOverlay');
-      document.getElementById('loadingTitle').textContent = title;
-      document.getElementById('loadingSubtitle').textContent = subtitle;
-      el.style.opacity = '1';
-      el.style.pointerEvents = 'auto';
     }
 
     function hideLoading() {
-      const el = document.getElementById('loadingOverlay');
-      el.style.opacity = '0';
-      el.style.pointerEvents = 'none';
-    }
-
-    function showToast(msg) {
-      const toast = document.getElementById('toast');
-      document.getElementById('toastMsg').textContent = msg;
-      toast.classList.remove('opacity-0', '-translate-y-3');
-      setTimeout(() => toast.classList.add('opacity-0', '-translate-y-3'), 3000);
+      document.getElementById('loadingOverlay').style.opacity = '0';
     }
 
     function formatTime(sec) {
       sec = Math.floor(sec) || 0;
       const h = Math.floor(sec / 3600);
       const m = Math.floor((sec % 3600) / 60);
-      const rem = sec % 60;
-      if (h > 0) return `${h}:${m.toString().padStart(2, '0')}:${rem.toString().padStart(2, '0')}`;
-      return `${m.toString().padStart(2, '0')}:${rem.toString().padStart(2, '0')}`;
+      const s = sec % 60;
+      if (h > 0) return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+      return `${m}:${s.toString().padStart(2, '0')}`;
     }
   </script>
 </body>

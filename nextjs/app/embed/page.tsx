@@ -9,21 +9,19 @@ import {
   Volume2,
   Volume1,
   VolumeX,
+  Settings,
+  Subtitles,
+  PictureInPicture2,
   Maximize,
   Minimize,
-  RotateCcw,
-  RotateCw,
-  Server,
-  Subtitles,
   Check,
-  X,
-  Sparkles,
-  PictureInPicture2,
-  Film,
-  Search,
+  Server,
+  Gauge,
+  ChevronRight,
+  RotateCcw,
 } from 'lucide-react';
 
-function CustomPlayerContent() {
+function VidstackStylePlayer() {
   const searchParams = useSearchParams();
   const id = searchParams.get('id') || '155';
   const type = searchParams.get('type') || 'movie';
@@ -36,23 +34,17 @@ function CustomPlayerContent() {
   const hlsRef = useRef<Hls | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
   const idleTimer = useRef<any>(null);
-  const clickTimer = useRef<any>(null);
-  const lastTapSide = useRef<string | null>(null);
 
-  // Mutable refs for robust state handling across async SSE events
+  // Mutable refs for stream state
   const sourcesRef = useRef<any[]>([]);
   const currentIdxRef = useRef<number>(-1);
   const hasStartedRef = useRef<boolean>(false);
 
-  // UI state
+  // Playback state
   const [sourcesList, setSourcesList] = useState<any[]>([]);
   const [activeIdx, setActiveIdx] = useState<number>(-1);
   const [subtitles, setSubtitles] = useState<any[]>([]);
   const [activeSubIdx, setActiveSubIdx] = useState<string>('off');
-  const [subSearch, setSubSearch] = useState<string>('');
-  const [mediaTitle, setMediaTitle] = useState<string>(`Loading ${type.toUpperCase()} #${id}...`);
-
-  // Playback state
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
   const [isMuted, setIsMuted] = useState<boolean>(false);
   const [volume, setVolume] = useState<number>(1);
@@ -62,43 +54,25 @@ function CustomPlayerContent() {
   const [playbackSpeed, setPlaybackSpeed] = useState<number>(1);
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
   const [isIdle, setIsIdle] = useState<boolean>(false);
+  const [isVolumeHovered, setIsVolumeHovered] = useState<boolean>(false);
+  const [showRemainingTime, setShowRemainingTime] = useState<boolean>(true);
 
-  // Scrubber hover state
-  const [hoverTime, setHoverTime] = useState<string>('00:00');
-  const [hoverPos, setHoverPos] = useState<number>(0);
-  const [showTooltip, setShowTooltip] = useState<boolean>(false);
-
-  // Status & Feedback state
+  // Menus
+  const [menuOpen, setMenuOpen] = useState<'settings' | 'servers' | 'speed' | 'subtitles' | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
-  const [statusTitle, setStatusTitle] = useState<string>('Searching Best Stream');
-  const [statusSubtitle, setStatusSubtitle] = useState<string>('Connecting to SSE pipeline...');
-  const [activeModal, setActiveModal] = useState<'servers' | 'subtitles' | 'speed' | null>(null);
-  const [toastMsg, setToastMsg] = useState<string | null>(null);
-  const [centerRipple, setCenterRipple] = useState<{ type: string; text?: string } | null>(null);
 
-  const triggerToast = (msg: string) => {
-    setToastMsg(msg);
-    setTimeout(() => setToastMsg(null), 3200);
-  };
-
-  const triggerRipple = (type: string, text?: string) => {
-    setCenterRipple({ type, text });
-    setTimeout(() => setCenterRipple(null), 450);
-  };
-
-  // Auto-hide controls when playing and idle
+  // Auto-hide controls
   const resetIdle = () => {
     setIsIdle(false);
     clearTimeout(idleTimer.current);
-    if (isPlaying) {
+    if (isPlaying && !menuOpen) {
       idleTimer.current = setTimeout(() => {
         setIsIdle(true);
-        setActiveModal(null);
-      }, 2800);
+      }, 2600);
     }
   };
 
-  // CORE ENGINE: Play stream using native <video> + Hls.js only if HLS
+  // Play a specific source
   const playSource = (idx: number) => {
     const list = sourcesRef.current;
     if (idx < 0 || idx >= list.length || !videoRef.current) return;
@@ -110,10 +84,8 @@ function CustomPlayerContent() {
     const streamUrl = src.url;
     const isHls = streamUrl.includes('.m3u8') || src.type === 'hls' || streamUrl.includes('api?url=');
 
-    console.log(`[Player] Loading source #${idx + 1} (${src.label || src.source}) | isHls: ${isHls}`);
-    triggerToast(`Connected: ${src.label || src.source}`);
+    console.log(`[Player] Playing #${idx + 1}: ${src.label || src.source} (isHls: ${isHls})`);
 
-    // Clean up previous HLS instance if any
     if (hlsRef.current) {
       hlsRef.current.destroy();
       hlsRef.current = null;
@@ -122,7 +94,6 @@ function CustomPlayerContent() {
     const video = videoRef.current;
 
     if (isHls && Hls.isSupported()) {
-      // 1. ENGINE: HLS.js for HLS streams on non-Safari browsers
       const hls = new Hls({
         enableWorker: true,
         lowLatencyMode: true,
@@ -135,61 +106,48 @@ function CustomPlayerContent() {
 
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
         setIsLoading(false);
-        if (autoplay) {
-          video.play().catch(() => {});
-        }
+        if (autoplay) video.play().catch(() => {});
       });
 
       hls.on(Hls.Events.ERROR, (_, data) => {
         if (data.fatal) {
-          console.warn('[Player] HLS fatal error, switching to fallback:', data);
-          triggerAutoFallback();
+          triggerFallback();
         }
       });
     } else {
-      // 2. ENGINE: Native <video> for direct MP4, MKV, or Safari native HLS
       video.src = streamUrl;
       video.load();
 
       video.onloadeddata = () => {
         setIsLoading(false);
-        if (autoplay) {
-          video.play().catch(() => {});
-        }
+        if (autoplay) video.play().catch(() => {});
       };
 
       video.onerror = () => {
-        console.warn('[Player] Native video error, switching to fallback');
-        triggerAutoFallback();
+        triggerFallback();
       };
     }
   };
 
-  const triggerAutoFallback = () => {
+  const triggerFallback = () => {
     const nextIdx = currentIdxRef.current + 1;
     if (nextIdx < sourcesRef.current.length) {
-      triggerToast(`Server failed. Trying backup #${nextIdx + 1}...`);
       playSource(nextIdx);
     } else {
       setIsLoading(true);
-      setStatusTitle('All Servers Failed');
-      setStatusSubtitle('All candidate streams were exhausted for this title.');
     }
   };
 
-  // SSE Pipeline Lifecycle
+  // SSE Pipeline
   useEffect(() => {
     if (!id) return;
 
-    // Reset state
     sourcesRef.current = [];
     currentIdxRef.current = -1;
     hasStartedRef.current = false;
     setSourcesList([]);
     setActiveIdx(-1);
     setIsLoading(true);
-    setStatusTitle('Searching Best Stream');
-    setStatusSubtitle('Querying parallel SSE providers...');
 
     const sseUrl =
       type === 'tv'
@@ -204,17 +162,13 @@ function CustomPlayerContent() {
         const data = JSON.parse(event.data);
 
         if (data.type === 'meta') {
-          if (data.meta?.title) setMediaTitle(data.meta.title);
-          if (Array.isArray(data.subtitles)) {
-            setSubtitles(data.subtitles);
-          }
+          if (Array.isArray(data.subtitles)) setSubtitles(data.subtitles);
         }
 
         if (data.type === 'source') {
           sourcesRef.current.push(data.source);
           setSourcesList([...sourcesRef.current]);
 
-          // Immediately start with first candidate!
           if (!hasStartedRef.current) {
             hasStartedRef.current = true;
             playSource(0);
@@ -223,24 +177,14 @@ function CustomPlayerContent() {
 
         if (data.type === 'done') {
           es.close();
-          if (sourcesRef.current.length === 0) {
-            setIsLoading(true);
-            setStatusTitle('No Playable Sources');
-            setStatusSubtitle('All stream providers returned 0 candidates.');
-          }
         }
       } catch (err) {
-        console.error('SSE Error:', err);
+        console.error(err);
       }
     };
 
     es.onerror = () => {
       es.close();
-      if (sourcesRef.current.length === 0) {
-        setIsLoading(true);
-        setStatusTitle('Connection Error');
-        setStatusSubtitle('Unable to receive stream data from server.');
-      }
     };
 
     return () => {
@@ -249,22 +193,11 @@ function CustomPlayerContent() {
     };
   }, [id, type, season, episode]);
 
-  // Video Controls
+  // Controls
   const togglePlay = () => {
     if (!videoRef.current) return;
-    if (videoRef.current.paused) {
-      videoRef.current.play().catch(() => {});
-      triggerRipple('play');
-    } else {
-      videoRef.current.pause();
-      triggerRipple('pause');
-    }
-  };
-
-  const skipTime = (sec: number) => {
-    if (!videoRef.current) return;
-    videoRef.current.currentTime = Math.max(0, Math.min(videoRef.current.currentTime + sec, duration));
-    triggerRipple(sec > 0 ? 'forward' : 'rewind', `${sec > 0 ? '+' : ''}${sec}s`);
+    if (videoRef.current.paused) videoRef.current.play().catch(() => {});
+    else videoRef.current.pause();
   };
 
   const toggleMute = () => {
@@ -273,31 +206,12 @@ function CustomPlayerContent() {
     setIsMuted(videoRef.current.muted);
   };
 
-  const changeVolume = (val: number) => {
+  const handleVolumeChange = (val: number) => {
     if (!videoRef.current) return;
     videoRef.current.volume = val;
     setVolume(val);
     videoRef.current.muted = val === 0;
     setIsMuted(val === 0);
-  };
-
-  const changeSpeed = (spd: number) => {
-    if (!videoRef.current) return;
-    videoRef.current.playbackRate = spd;
-    setPlaybackSpeed(spd);
-    setActiveModal(null);
-    triggerToast(`Playback speed: ${spd}x`);
-  };
-
-  const selectSubtitle = (idx: string) => {
-    setActiveSubIdx(idx);
-    if (!videoRef.current) return;
-    const tracks = videoRef.current.textTracks;
-    for (let i = 0; i < tracks.length; i++) {
-      tracks[i].mode = idx !== 'off' && parseInt(idx) === i ? 'showing' : 'disabled';
-    }
-    setActiveModal(null);
-    triggerToast(idx === 'off' ? 'Subtitles off' : `Subtitles: ${subtitles[parseInt(idx)]?.label || 'Active'}`);
   };
 
   const toggleFullscreen = () => {
@@ -321,50 +235,22 @@ function CustomPlayerContent() {
     } catch (e) {}
   };
 
-  // Double-tap skip gesture
-  const handleTap = (side: 'left' | 'center' | 'right') => {
-    if (clickTimer.current && lastTapSide.current === side) {
-      clearTimeout(clickTimer.current);
-      clickTimer.current = null;
-      if (side === 'left') skipTime(-10);
-      else if (side === 'right') skipTime(10);
-      else toggleFullscreen();
-    } else {
-      lastTapSide.current = side;
-      clickTimer.current = setTimeout(() => {
-        clickTimer.current = null;
-        if (side === 'center') togglePlay();
-        else resetIdle();
-      }, 250);
-    }
+  const changeSpeed = (spd: number) => {
+    if (!videoRef.current) return;
+    videoRef.current.playbackRate = spd;
+    setPlaybackSpeed(spd);
+    setMenuOpen(null);
   };
 
-  // Keyboard Shortcuts
-  useEffect(() => {
-    const handleKey = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement) return;
-      if (e.code === 'Space' || e.code === 'KeyK') {
-        e.preventDefault();
-        togglePlay();
-      } else if (e.code === 'ArrowLeft' || e.code === 'KeyJ') {
-        skipTime(-10);
-      } else if (e.code === 'ArrowRight' || e.code === 'KeyL') {
-        skipTime(10);
-      } else if (e.code === 'ArrowUp') {
-        e.preventDefault();
-        changeVolume(Math.min(1, volume + 0.1));
-      } else if (e.code === 'ArrowDown') {
-        e.preventDefault();
-        changeVolume(Math.max(0, volume - 0.1));
-      } else if (e.code === 'KeyM') {
-        toggleMute();
-      } else if (e.code === 'KeyF') {
-        toggleFullscreen();
-      }
-    };
-    window.addEventListener('keydown', handleKey);
-    return () => window.removeEventListener('keydown', handleKey);
-  }, [volume, duration, isPlaying]);
+  const selectSubtitle = (idx: string) => {
+    setActiveSubIdx(idx);
+    if (!videoRef.current) return;
+    const tracks = videoRef.current.textTracks;
+    for (let i = 0; i < tracks.length; i++) {
+      tracks[i].mode = idx !== 'off' && parseInt(idx) === i ? 'showing' : 'disabled';
+    }
+    setMenuOpen(null);
+  };
 
   const formatTime = (sec: number) => {
     const s = Math.floor(sec) || 0;
@@ -372,14 +258,20 @@ function CustomPlayerContent() {
     const m = Math.floor((s % 3600) / 60);
     const rem = s % 60;
     if (h > 0) return `${h}:${m.toString().padStart(2, '0')}:${rem.toString().padStart(2, '0')}`;
-    return `${m.toString().padStart(2, '0')}:${rem.toString().padStart(2, '0')}`;
+    return `${m}:${rem.toString().padStart(2, '0')}`;
+  };
+
+  const formatRemaining = () => {
+    const rem = Math.max(0, duration - currentTime);
+    return `-${formatTime(rem)}`;
   };
 
   return (
     <div
       ref={containerRef}
       onMouseMove={resetIdle}
-      className={`relative w-screen h-screen bg-black overflow-hidden flex items-center justify-center select-none ${
+      onClick={() => setMenuOpen(null)}
+      className={`relative w-screen h-screen bg-black overflow-hidden flex items-center justify-center select-none font-sans ${
         isIdle ? 'cursor-none' : ''
       }`}
     >
@@ -388,6 +280,10 @@ function CustomPlayerContent() {
         ref={videoRef}
         playsInline
         crossOrigin="anonymous"
+        onClick={(e) => {
+          e.stopPropagation();
+          togglePlay();
+        }}
         onPlay={() => {
           setIsPlaying(true);
           resetIdle();
@@ -419,323 +315,257 @@ function CustomPlayerContent() {
         ))}
       </video>
 
-      {/* 2. GESTURE OVERLAY (Double-Click Skip Left / Center / Right) */}
-      <div className="absolute inset-0 z-10 grid grid-cols-3 cursor-pointer">
-        <div onClick={() => handleTap('left')} className="h-full" />
-        <div onClick={() => handleTap('center')} className="h-full" />
-        <div onClick={() => handleTap('right')} className="h-full" />
-      </div>
-
-      {/* Center Action Ripple Indicator */}
-      {centerRipple && (
-        <div className="absolute z-30 pointer-events-none flex flex-col items-center justify-center animate-pulse">
-          <div className="w-20 h-20 rounded-full bg-black/60 backdrop-blur-md border border-white/10 flex items-center justify-center text-white shadow-2xl">
-            {centerRipple.type === 'play' && <Play className="w-10 h-10 fill-current ml-1" />}
-            {centerRipple.type === 'pause' && <Pause className="w-10 h-10 fill-current" />}
-            {centerRipple.type === 'rewind' && <RotateCcw className="w-10 h-10" />}
-            {centerRipple.type === 'forward' && <RotateCw className="w-10 h-10" />}
-          </div>
-          {centerRipple.text && (
-            <span className="mt-2 text-xs font-bold tracking-wider text-slate-200">{centerRipple.text}</span>
-          )}
-        </div>
-      )}
-
-      {/* Loading Overlay */}
+      {/* Loading Spinner */}
       {isLoading && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 backdrop-blur-sm z-30 pointer-events-none">
-          <div className="relative flex items-center justify-center mb-4">
-            <div className="w-16 h-16 rounded-full border-4 border-indigo-500/20 border-t-indigo-500 animate-spin" />
-            <div className="absolute w-8 h-8 rounded-full bg-indigo-600/30 blur-md animate-pulse" />
-          </div>
-          <h3 className="text-sm font-semibold tracking-wider text-slate-100 uppercase">{statusTitle}</h3>
-          <p className="text-xs text-slate-400 mt-1 max-w-xs text-center font-mono">{statusSubtitle}</p>
+        <div className="absolute inset-0 flex items-center justify-center bg-black/60 backdrop-blur-[2px] z-30 pointer-events-none">
+          <div className="w-12 h-12 border-3 border-white/20 border-t-white rounded-full animate-spin" />
         </div>
       )}
 
-      {/* Toast Notification */}
-      {toastMsg && (
-        <div className="absolute top-5 right-5 z-40 transition-all duration-300">
-          <div className="px-4 py-2 rounded-xl bg-slate-900/90 backdrop-blur-md text-xs text-white shadow-2xl flex items-center gap-2.5 border border-white/10">
-            <Sparkles className="w-4 h-4 text-indigo-400 shrink-0" />
-            <span className="font-medium">{toastMsg}</span>
-          </div>
-        </div>
-      )}
-
-      {/* Hover Scrubber Tooltip */}
-      {showTooltip && (
-        <div
-          style={{ left: `${hoverPos}px` }}
-          className="absolute bottom-20 z-40 bg-slate-900/95 text-[11px] font-mono px-2 py-1 rounded text-white border border-slate-700 pointer-events-none transform -translate-x-1/2 shadow-xl"
-        >
-          {hoverTime}
-        </div>
-      )}
-
-      {/* 3. CUSTOM TOP BAR */}
+      {/* 2. THE EXACT MINIMALIST BOTTOM PILL BAR (MATCHING THE SCREENSHOT) */}
       <div
-        className={`absolute top-0 left-0 right-0 p-4 sm:p-5 flex items-center justify-between z-20 pointer-events-none bg-gradient-to-b from-black/85 via-black/30 to-transparent transition-opacity duration-300 ${
-          isIdle ? 'opacity-0' : 'opacity-100'
+        onClick={(e) => e.stopPropagation()}
+        className={`absolute bottom-3 left-4 right-4 sm:left-6 sm:right-6 z-20 transition-all duration-300 pointer-events-auto ${
+          isIdle ? 'opacity-0 translate-y-3 pointer-events-none' : 'opacity-100 translate-y-0'
         }`}
       >
-        <div className="flex items-center space-x-3 pointer-events-auto">
-          <div className="w-8 h-8 rounded-xl bg-indigo-600 flex items-center justify-center shadow-lg shadow-indigo-600/30">
-            <Film className="w-4 h-4 text-white" />
-          </div>
-          <div>
-            <h1 className="text-xs sm:text-sm font-bold text-white tracking-wide truncate max-w-[200px] sm:max-w-md">
-              {mediaTitle}
-            </h1>
-            <p className="text-[10px] text-slate-400 font-mono">
-              TMDB #{id} {type === 'tv' && `• S${season} E${episode}`}
-            </p>
-          </div>
-        </div>
-
-        {/* Server Selector Trigger */}
-        <div className="flex items-center space-x-2 pointer-events-auto">
+        <div className="bg-black/60 hover:bg-black/75 backdrop-blur-md border border-white/10 rounded-xl px-3.5 py-2.5 flex items-center gap-3 text-white text-xs shadow-2xl transition-colors">
+          {/* Play / Pause Button */}
           <button
-            onClick={() => setActiveModal(activeModal === 'servers' ? null : 'servers')}
-            className="flex items-center space-x-2 px-3 py-1.5 rounded-full bg-slate-900/80 backdrop-blur border border-white/10 hover:bg-white/10 text-xs transition"
+            onClick={togglePlay}
+            className="p-1 rounded-md hover:text-white text-slate-200 transition active:scale-95 focus:outline-none"
           >
-            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-            <span className="text-[11px] font-medium text-slate-200">
-              {sourcesList[activeIdx]?.label || sourcesList[activeIdx]?.source || 'Auto Server'}
-            </span>
+            {isPlaying ? (
+              <Pause className="w-4 h-4 fill-current" />
+            ) : (
+              <Play className="w-4 h-4 fill-current ml-0.5" />
+            )}
           </button>
-        </div>
-      </div>
 
-      {/* 4. CUSTOM BOTTOM CONTROLS BAR */}
-      <div
-        className={`absolute bottom-0 left-0 right-0 p-4 sm:p-5 flex flex-col justify-end space-y-3 z-20 pointer-events-none bg-gradient-to-t from-black/90 via-black/40 to-transparent transition-opacity duration-300 ${
-          isIdle ? 'opacity-0' : 'opacity-100'
-        }`}
-      >
-        {/* Scrubber Progress Bar */}
-        <div className="w-full pointer-events-auto py-2">
+          {/* Volume with Hover Slider */}
           <div
-            onMouseMove={(e) => {
-              if (!duration) return;
-              const rect = e.currentTarget.getBoundingClientRect();
-              const pos = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-              setHoverTime(formatTime(pos * duration));
-              setHoverPos(e.clientX);
-              setShowTooltip(true);
-            }}
-            onMouseLeave={() => setShowTooltip(false)}
+            onMouseEnter={() => setIsVolumeHovered(true)}
+            onMouseLeave={() => setIsVolumeHovered(false)}
+            className="flex items-center gap-1.5"
+          >
+            <button
+              onClick={toggleMute}
+              className="p-1 rounded-md hover:text-white text-slate-200 transition focus:outline-none"
+            >
+              {isMuted || volume === 0 ? (
+                <VolumeX className="w-4 h-4" />
+              ) : volume < 0.5 ? (
+                <Volume1 className="w-4 h-4" />
+              ) : (
+                <Volume2 className="w-4 h-4" />
+              )}
+            </button>
+            <div
+              className={`overflow-hidden transition-all duration-200 flex items-center ${
+                isVolumeHovered ? 'w-16 opacity-100' : 'w-0 opacity-0'
+              }`}
+            >
+              <input
+                type="range"
+                min="0"
+                max="1"
+                step="0.05"
+                value={isMuted ? 0 : volume}
+                onChange={(e) => handleVolumeChange(parseFloat(e.target.value))}
+                className="w-14 h-1 bg-white/30 rounded-full cursor-pointer accent-white"
+              />
+            </div>
+          </div>
+
+          {/* Current Time Display */}
+          <span className="font-mono text-[11px] text-slate-200 tracking-tight shrink-0">
+            {formatTime(currentTime)}
+          </span>
+
+          {/* Scrubber Progress Bar (Middle Line) */}
+          <div
             onClick={(e) => {
               if (!duration || !videoRef.current) return;
               const rect = e.currentTarget.getBoundingClientRect();
               const pos = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
               videoRef.current.currentTime = pos * duration;
             }}
-            className="relative h-1.5 hover:h-2.5 rounded-full bg-white/20 cursor-pointer transition-all duration-150"
+            className="relative flex-1 h-1 hover:h-1.5 bg-white/20 rounded-full cursor-pointer transition-all duration-150 group/scrub"
           >
             {/* Buffered */}
             <div
               style={{ width: `${duration ? (bufferedEnd / duration) * 100 : 0}%` }}
-              className="absolute top-0 left-0 h-full rounded-full bg-white/35 transition-all duration-200"
+              className="absolute top-0 left-0 h-full rounded-full bg-white/30"
             />
-            {/* Played */}
+            {/* Played (White Solid Bar) */}
             <div
               style={{ width: `${duration ? (currentTime / duration) * 100 : 0}%` }}
-              className="absolute top-0 left-0 h-full rounded-full bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 shadow-md"
-            />
-          </div>
-        </div>
-
-        {/* Controls Row */}
-        <div className="flex items-center justify-between pointer-events-auto">
-          {/* Left Controls */}
-          <div className="flex items-center space-x-2 sm:space-x-3">
-            <button onClick={togglePlay} className="p-2 rounded-xl hover:bg-white/10 text-white transition active:scale-95">
-              {isPlaying ? <Pause className="w-5 h-5 fill-current" /> : <Play className="w-5 h-5 fill-current" />}
-            </button>
-            <button onClick={() => skipTime(-10)} className="p-2 rounded-xl hover:bg-white/10 text-slate-300 hover:text-white transition active:scale-95">
-              <RotateCcw className="w-4 h-4" />
-            </button>
-            <button onClick={() => skipTime(10)} className="p-2 rounded-xl hover:bg-white/10 text-slate-300 hover:text-white transition active:scale-95">
-              <RotateCw className="w-4 h-4" />
-            </button>
-
-            {/* Volume */}
-            <div className="flex items-center space-x-2 group/vol">
-              <button onClick={toggleMute} className="p-2 rounded-xl hover:bg-white/10 text-white transition">
-                {isMuted || volume === 0 ? <VolumeX className="w-5 h-5" /> : volume < 0.5 ? <Volume1 className="w-5 h-5" /> : <Volume2 className="w-5 h-5" />}
-              </button>
-              <div className="w-0 group-hover/vol:w-16 overflow-hidden transition-all duration-200 flex items-center">
-                <input
-                  type="range"
-                  min="0"
-                  max="1"
-                  step="0.05"
-                  value={isMuted ? 0 : volume}
-                  onChange={(e) => changeVolume(parseFloat(e.target.value))}
-                  className="w-14 h-1 bg-white/30 rounded cursor-pointer accent-indigo-500"
-                />
-              </div>
-            </div>
-
-            {/* Time */}
-            <div className="text-[11px] font-mono text-slate-300 pl-1">
-              <span>{formatTime(currentTime)}</span>
-              <span className="text-slate-500"> / </span>
-              <span className="text-slate-400">{formatTime(duration)}</span>
-            </div>
-          </div>
-
-          {/* Right Controls */}
-          <div className="flex items-center space-x-1.5 sm:space-x-2">
-            {/* Servers */}
-            <button
-              onClick={() => setActiveModal(activeModal === 'servers' ? null : 'servers')}
-              className="px-2.5 py-1.5 rounded-xl hover:bg-white/10 text-slate-200 transition flex items-center gap-1.5 text-xs border border-white/5 active:scale-95"
+              className="absolute top-0 left-0 h-full rounded-full bg-white flex items-center justify-end"
             >
-              <Server className="w-4 h-4 text-indigo-400" />
-              <span className="hidden md:inline font-medium">Servers ({sourcesList.length})</span>
-            </button>
-
-            {/* Subtitles */}
-            <button
-              onClick={() => setActiveModal(activeModal === 'subtitles' ? null : 'subtitles')}
-              className="px-2.5 py-1.5 rounded-xl hover:bg-white/10 text-slate-200 transition flex items-center gap-1.5 text-xs border border-white/5 active:scale-95"
-            >
-              <Subtitles className="w-4 h-4 text-indigo-400" />
-              <span className="hidden md:inline font-medium">CC</span>
-            </button>
-
-            {/* Speed */}
-            <button
-              onClick={() => setActiveModal(activeModal === 'speed' ? null : 'speed')}
-              className="px-2 py-1.5 rounded-xl hover:bg-white/10 text-slate-200 transition text-xs font-mono font-medium border border-white/5 active:scale-95"
-            >
-              {playbackSpeed}x
-            </button>
-
-            {/* PiP */}
-            <button onClick={togglePiP} className="p-2 rounded-xl hover:bg-white/10 text-slate-300 hover:text-white transition active:scale-95">
-              <PictureInPicture2 className="w-4 h-4" />
-            </button>
-
-            {/* Fullscreen */}
-            <button onClick={toggleFullscreen} className="p-2 rounded-xl hover:bg-white/10 text-slate-300 hover:text-white transition active:scale-95">
-              {isFullscreen ? <Minimize className="w-4 h-4" /> : <Maximize className="w-4 h-4" />}
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {/* 5. MODAL: SERVERS DRAWER */}
-      {activeModal === 'servers' && (
-        <div className="absolute bottom-20 right-4 sm:right-8 w-72 bg-slate-900/95 backdrop-blur-xl border border-white/10 rounded-2xl p-4 shadow-2xl z-40">
-          <div className="flex items-center justify-between border-b border-white/10 pb-2 mb-2">
-            <div className="flex items-center gap-2">
-              <Server className="w-4 h-4 text-indigo-400" />
-              <span className="text-xs font-bold uppercase tracking-wider text-slate-200">Available Servers</span>
+              <div className="w-2.5 h-2.5 bg-white rounded-full scale-0 group-hover/scrub:scale-100 transition-transform shadow-md" />
             </div>
-            <button onClick={() => setActiveModal(null)} className="text-slate-400 hover:text-white">
-              <X className="w-4 h-4" />
-            </button>
           </div>
-          <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1">
-            {sourcesList.map((src, i) => (
-              <button
-                key={i}
-                onClick={() => {
-                  playSource(i);
-                  setActiveModal(null);
-                }}
-                className={`w-full text-left px-3 py-2 rounded-xl text-xs transition flex items-center justify-between ${
-                  i === activeIdx ? 'bg-indigo-600 text-white font-semibold shadow-md' : 'text-slate-300 hover:bg-white/10'
-                }`}
-              >
-                <div className="flex items-center space-x-2 truncate">
-                  <span className={`w-1.5 h-1.5 rounded-full ${i === activeIdx ? 'bg-white' : 'bg-indigo-400'}`} />
-                  <span className="truncate">{src.label || src.source}</span>
-                </div>
-                <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-black/40 border border-white/10">
-                  {src.quality || 'Auto'}
-                </span>
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
 
-      {/* 6. MODAL: SUBTITLES DRAWER */}
-      {activeModal === 'subtitles' && (
-        <div className="absolute bottom-20 right-4 sm:right-8 w-80 bg-slate-900/95 backdrop-blur-xl border border-white/10 rounded-2xl p-4 shadow-2xl z-40">
-          <div className="flex items-center justify-between border-b border-white/10 pb-2 mb-2">
-            <div className="flex items-center gap-2">
-              <Subtitles className="w-4 h-4 text-indigo-400" />
-              <span className="text-xs font-bold uppercase tracking-wider text-slate-200">Subtitles / CC</span>
-            </div>
-            <button onClick={() => setActiveModal(null)} className="text-slate-400 hover:text-white">
-              <X className="w-4 h-4" />
-            </button>
-          </div>
-          <div className="relative mb-2">
-            <input
-              type="text"
-              placeholder="Search language..."
-              value={subSearch}
-              onChange={(e) => setSubSearch(e.target.value)}
-              className="w-full bg-slate-950/70 border border-white/10 rounded-lg px-2.5 py-1.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 pl-8"
-            />
-            <Search className="w-3.5 h-3.5 text-slate-500 absolute left-2.5 top-2.5" />
-          </div>
-          <div className="space-y-1 max-h-52 overflow-y-auto pr-1">
+          {/* Remaining / Total Time */}
+          <button
+            onClick={() => setShowRemainingTime(!showRemainingTime)}
+            className="font-mono text-[11px] text-slate-300 hover:text-white tracking-tight shrink-0 transition"
+          >
+            {showRemainingTime ? formatRemaining() : formatTime(duration)}
+          </button>
+
+          {/* Settings Icon (Gear) */}
+          <div className="relative">
             <button
-              onClick={() => selectSubtitle('off')}
-              className={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs hover:bg-white/10 flex justify-between ${
-                activeSubIdx === 'off' ? 'text-indigo-400 font-bold' : 'text-slate-300'
+              onClick={() => setMenuOpen(menuOpen === 'settings' ? null : 'settings')}
+              className={`p-1 rounded-md transition focus:outline-none ${
+                menuOpen === 'settings' || menuOpen === 'servers' || menuOpen === 'speed'
+                  ? 'text-white'
+                  : 'text-slate-300 hover:text-white'
               }`}
             >
-              <span>Off</span>
-              {activeSubIdx === 'off' && <Check className="w-3.5 h-3.5" />}
+              <Settings className="w-4 h-4" />
             </button>
-            {subtitles
-              .filter((s) => (s.label || '').toLowerCase().includes(subSearch.toLowerCase()))
-              .map((sub, i) => (
+
+            {/* Main Settings Menu Popover */}
+            {menuOpen === 'settings' && (
+              <div className="absolute bottom-11 right-0 w-52 bg-slate-950/95 border border-white/10 rounded-xl p-2 shadow-2xl text-xs space-y-1 backdrop-blur-xl">
                 <button
-                  key={i}
-                  onClick={() => selectSubtitle(String(i))}
-                  className={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs hover:bg-white/10 flex justify-between truncate ${
-                    activeSubIdx === String(i) ? 'text-indigo-400 font-bold' : 'text-slate-300'
+                  onClick={() => setMenuOpen('servers')}
+                  className="w-full px-2.5 py-2 rounded-lg hover:bg-white/10 flex items-center justify-between text-slate-200 transition"
+                >
+                  <span className="flex items-center gap-2">
+                    <Server className="w-3.5 h-3.5 text-slate-400" />
+                    <span>Server</span>
+                  </span>
+                  <div className="flex items-center gap-1 text-[11px] text-slate-400">
+                    <span className="truncate max-w-[80px]">
+                      {sourcesList[activeIdx]?.label || sourcesList[activeIdx]?.source || 'Auto'}
+                    </span>
+                    <ChevronRight className="w-3 h-3" />
+                  </div>
+                </button>
+
+                <button
+                  onClick={() => setMenuOpen('speed')}
+                  className="w-full px-2.5 py-2 rounded-lg hover:bg-white/10 flex items-center justify-between text-slate-200 transition"
+                >
+                  <span className="flex items-center gap-2">
+                    <Gauge className="w-3.5 h-3.5 text-slate-400" />
+                    <span>Speed</span>
+                  </span>
+                  <div className="flex items-center gap-1 text-[11px] text-slate-400">
+                    <span>{playbackSpeed}x</span>
+                    <ChevronRight className="w-3 h-3" />
+                  </div>
+                </button>
+              </div>
+            )}
+
+            {/* Servers Submenu */}
+            {menuOpen === 'servers' && (
+              <div className="absolute bottom-11 right-0 w-64 bg-slate-950/95 border border-white/10 rounded-xl p-2 shadow-2xl text-xs space-y-1 backdrop-blur-xl max-h-56 overflow-y-auto">
+                <div className="text-[10px] uppercase font-bold text-slate-400 px-2 py-1 border-b border-white/10">
+                  Select Server
+                </div>
+                {sourcesList.map((src, i) => (
+                  <button
+                    key={i}
+                    onClick={() => {
+                      playSource(i);
+                      setMenuOpen(null);
+                    }}
+                    className={`w-full px-2.5 py-1.5 rounded-lg flex items-center justify-between transition ${
+                      i === activeIdx ? 'bg-white/15 text-white font-medium' : 'text-slate-300 hover:bg-white/10'
+                    }`}
+                  >
+                    <span className="truncate">{src.label || src.source}</span>
+                    <span className="text-[10px] text-slate-400 font-mono">{src.quality || 'Auto'}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {/* Speed Submenu */}
+            {menuOpen === 'speed' && (
+              <div className="absolute bottom-11 right-0 w-40 bg-slate-950/95 border border-white/10 rounded-xl p-2 shadow-2xl text-xs space-y-1 backdrop-blur-xl">
+                <div className="text-[10px] uppercase font-bold text-slate-400 px-2 py-1 border-b border-white/10">
+                  Playback Speed
+                </div>
+                {[0.5, 0.75, 1.0, 1.25, 1.5, 2.0].map((spd) => (
+                  <button
+                    key={spd}
+                    onClick={() => changeSpeed(spd)}
+                    className={`w-full px-2 py-1.5 rounded-lg flex items-center justify-between transition ${
+                      playbackSpeed === spd ? 'bg-white/15 text-white font-semibold' : 'text-slate-300 hover:bg-white/10'
+                    }`}
+                  >
+                    <span>{spd}x {spd === 1.0 && '(Normal)'}</span>
+                    {playbackSpeed === spd && <Check className="w-3.5 h-3.5" />}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Subtitles / CC Icon */}
+          <div className="relative">
+            <button
+              onClick={() => setMenuOpen(menuOpen === 'subtitles' ? null : 'subtitles')}
+              className={`p-1 rounded-md transition focus:outline-none ${
+                activeSubIdx !== 'off' ? 'text-white font-bold' : 'text-slate-300 hover:text-white'
+              }`}
+            >
+              <Subtitles className="w-4 h-4" />
+            </button>
+
+            {menuOpen === 'subtitles' && (
+              <div className="absolute bottom-11 right-0 w-56 bg-slate-950/95 border border-white/10 rounded-xl p-2 shadow-2xl text-xs space-y-1 backdrop-blur-xl max-h-56 overflow-y-auto">
+                <div className="text-[10px] uppercase font-bold text-slate-400 px-2 py-1 border-b border-white/10">
+                  Subtitles
+                </div>
+                <button
+                  onClick={() => selectSubtitle('off')}
+                  className={`w-full px-2 py-1.5 rounded-lg flex items-center justify-between transition ${
+                    activeSubIdx === 'off' ? 'bg-white/15 text-white font-semibold' : 'text-slate-300 hover:bg-white/10'
                   }`}
                 >
-                  <span className="truncate">{sub.label || `Track ${i + 1}`}</span>
-                  {activeSubIdx === String(i) && <Check className="w-3.5 h-3.5" />}
+                  <span>Off</span>
+                  {activeSubIdx === 'off' && <Check className="w-3.5 h-3.5" />}
                 </button>
-              ))}
+                {subtitles.map((sub, i) => (
+                  <button
+                    key={i}
+                    onClick={() => selectSubtitle(String(i))}
+                    className={`w-full px-2 py-1.5 rounded-lg flex items-center justify-between truncate transition ${
+                      activeSubIdx === String(i) ? 'bg-white/15 text-white font-semibold' : 'text-slate-300 hover:bg-white/10'
+                    }`}
+                  >
+                    <span className="truncate">{sub.label || `Track ${i + 1}`}</span>
+                    {activeSubIdx === String(i) && <Check className="w-3.5 h-3.5" />}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
-        </div>
-      )}
 
-      {/* 7. MODAL: SPEED DRAWER */}
-      {activeModal === 'speed' && (
-        <div className="absolute bottom-20 right-4 sm:right-24 w-44 bg-slate-900/95 backdrop-blur-xl border border-white/10 rounded-2xl p-3 shadow-2xl z-40">
-          <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400 border-b border-white/10 pb-2 mb-2">
-            Playback Speed
-          </div>
-          <div className="space-y-1">
-            {[0.5, 0.75, 1.0, 1.25, 1.5, 2.0].map((spd) => (
-              <button
-                key={spd}
-                onClick={() => changeSpeed(spd)}
-                className={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs hover:bg-white/10 flex justify-between ${
-                  playbackSpeed === spd ? 'font-bold text-indigo-400' : 'text-slate-300'
-                }`}
-              >
-                <span>{spd}x {spd === 1.0 && '(Normal)'}</span>
-                {playbackSpeed === spd && <Check className="w-3.5 h-3.5" />}
-              </button>
-            ))}
-          </div>
+          {/* Picture in Picture */}
+          <button
+            onClick={togglePiP}
+            className="p-1 rounded-md hover:text-white text-slate-300 transition focus:outline-none"
+          >
+            <PictureInPicture2 className="w-4 h-4" />
+          </button>
+
+          {/* Fullscreen Icon */}
+          <button
+            onClick={toggleFullscreen}
+            className="p-1 rounded-md hover:text-white text-slate-300 transition focus:outline-none"
+          >
+            {isFullscreen ? <Minimize className="w-4 h-4" /> : <Maximize className="w-4 h-4" />}
+          </button>
         </div>
-      )}
+      </div>
     </div>
   );
 }
@@ -744,12 +574,12 @@ export default function EmbedPage() {
   return (
     <Suspense
       fallback={
-        <div className="w-screen h-screen bg-black flex items-center justify-center text-slate-400 text-sm">
-          Loading Custom Player...
+        <div className="w-screen h-screen bg-black flex items-center justify-center text-slate-400 text-xs font-mono">
+          Loading Player...
         </div>
       }
     >
-      <CustomPlayerContent />
+      <VidstackStylePlayer />
     </Suspense>
   );
 }
