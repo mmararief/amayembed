@@ -14,12 +14,20 @@ function VideoJsEmbedContent() {
   const episode = searchParams.get('episode') || searchParams.get('e') || '1';
   const autoplay = searchParams.get('autoplay') !== '0';
 
-  const videoContainerRef = useRef<HTMLDivElement>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
   const playerRef = useRef<any>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
 
-  const [sources, setSources] = useState<any[]>([]);
-  const [currentIdx, setCurrentIdx] = useState<number>(-1);
+  // Mutable refs to eliminate React closure stale state bugs
+  const sourcesRef = useRef<any[]>([]);
+  const currentIdxRef = useRef<number>(-1);
+  const hasStartedRef = useRef<boolean>(false);
+  const isPlayerReadyRef = useRef<boolean>(false);
+  const pendingSourceRef = useRef<any | null>(null);
+
+  // UI state
+  const [sourcesList, setSourcesList] = useState<any[]>([]);
+  const [activeIdx, setActiveIdx] = useState<number>(-1);
   const [mediaTitle, setMediaTitle] = useState<string>(`Loading ${type.toUpperCase()} #${id}...`);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [statusTitle, setStatusTitle] = useState<string>('Searching Best Stream');
@@ -32,15 +40,62 @@ function VideoJsEmbedContent() {
     setTimeout(() => setToastMsg(null), 3200);
   };
 
-  // 1. Initialize Video.js Player
+  // Play a specific source index
+  const playSource = (idx: number) => {
+    const list = sourcesRef.current;
+    if (idx < 0 || idx >= list.length) return;
+
+    currentIdxRef.current = idx;
+    setActiveIdx(idx);
+    setIsLoading(false);
+
+    const src = list[idx];
+    triggerToast(`Server: ${src.label || src.source}`);
+
+    const streamUrl = src.url;
+    const isHls = streamUrl.includes('.m3u8') || src.type === 'hls' || streamUrl.includes('api?url=');
+    const mimeType = isHls ? 'application/x-mpegURL' : 'video/mp4';
+
+    if (!playerRef.current || !isPlayerReadyRef.current) {
+      pendingSourceRef.current = { src: streamUrl, type: mimeType };
+      return;
+    }
+
+    try {
+      playerRef.current.src({
+        src: streamUrl,
+        type: mimeType,
+      });
+
+      if (autoplay) {
+        playerRef.current.play().catch(() => {
+          console.log('Autoplay deferred by browser policy');
+        });
+      }
+    } catch (e) {
+      console.error('Player error loading source:', e);
+      fallbackNext();
+    }
+  };
+
+  // Fallback to next candidate if current fails
+  const fallbackNext = () => {
+    const nextIdx = currentIdxRef.current + 1;
+    if (nextIdx < sourcesRef.current.length) {
+      triggerToast(`Server failed. Trying backup #${nextIdx + 1}...`);
+      playSource(nextIdx);
+    } else {
+      setIsLoading(true);
+      setStatusTitle('All Servers Failed');
+      setStatusSubtitle('No more playable candidate servers available.');
+    }
+  };
+
+  // 1. Initialize Video.js
   useEffect(() => {
-    if (!videoContainerRef.current) return;
+    if (!videoRef.current) return;
 
-    const videoElement = document.createElement('video-js');
-    videoElement.classList.add('vjs-default-skin', 'vjs-big-play-centered', 'w-full', 'h-full');
-    videoContainerRef.current.appendChild(videoElement);
-
-    const player = (playerRef.current = videojs(videoElement, {
+    const player = videojs(videoRef.current, {
       controls: true,
       autoplay: autoplay,
       preload: 'auto',
@@ -60,19 +115,29 @@ function VideoJsEmbedContent() {
           'fullscreenToggle',
         ],
       },
-    }));
+    }, () => {
+      isPlayerReadyRef.current = true;
+      playerRef.current = player;
 
-    // Auto-fallback on playback error
+      // If a source arrived before player was ready, play it now!
+      if (pendingSourceRef.current) {
+        player.src(pendingSourceRef.current);
+        pendingSourceRef.current = null;
+        if (autoplay) player.play().catch(() => {});
+      }
+    });
+
     player.on('error', () => {
-      console.warn('Video.js error encountered:', player.error());
-      player.error(null);
-      triggerFallback();
+      console.warn('Video.js playback error caught, triggering fallback...');
+      player.error(null); // Clear error dialog from screen
+      fallbackNext();
     });
 
     return () => {
       if (player && !player.isDisposed()) {
         player.dispose();
         playerRef.current = null;
+        isPlayerReadyRef.current = false;
       }
     };
   }, []);
@@ -81,8 +146,13 @@ function VideoJsEmbedContent() {
   useEffect(() => {
     if (!id) return;
 
-    setCurrentIdx(-1);
-    setSources([]);
+    // Reset state
+    sourcesRef.current = [];
+    currentIdxRef.current = -1;
+    hasStartedRef.current = false;
+    pendingSourceRef.current = null;
+    setSourcesList([]);
+    setActiveIdx(-1);
     setIsLoading(true);
     setStatusTitle('Searching Best Stream');
     setStatusSubtitle('Connecting to Next.js Route Handlers...');
@@ -101,33 +171,43 @@ function VideoJsEmbedContent() {
 
         if (data.type === 'meta') {
           if (data.meta?.title) setMediaTitle(data.meta.title);
+
+          // Add subtitles to Video.js
           if (Array.isArray(data.subtitles) && playerRef.current) {
             data.subtitles.forEach((sub: any, i: number) => {
-              playerRef.current.addRemoteTextTrack(
-                {
-                  kind: 'subtitles',
-                  label: sub.label || `Track ${i + 1}`,
-                  srclang: (sub.label || 'en').toLowerCase().slice(0, 2),
-                  src: sub.file,
-                },
-                false
-              );
+              try {
+                playerRef.current.addRemoteTextTrack(
+                  {
+                    kind: 'subtitles',
+                    label: sub.label || `Track ${i + 1}`,
+                    srclang: (sub.label || 'en').toLowerCase().slice(0, 2),
+                    src: sub.file,
+                  },
+                  false
+                );
+              } catch (e) {}
             });
           }
         }
 
         if (data.type === 'source') {
-          setSources((prev) => {
-            const next = [...prev, data.source];
-            if (currentIdx === -1 && next.length === 1) {
-              playStream(next, 0);
-            }
-            return next;
-          });
+          sourcesRef.current.push(data.source);
+          setSourcesList([...sourcesRef.current]);
+
+          // As soon as the FIRST source arrives, immediately start playback!
+          if (!hasStartedRef.current) {
+            hasStartedRef.current = true;
+            playSource(0);
+          }
         }
 
         if (data.type === 'done') {
           es.close();
+          if (sourcesRef.current.length === 0) {
+            setIsLoading(true);
+            setStatusTitle('No Playable Sources');
+            setStatusSubtitle('All stream providers returned 0 candidates.');
+          }
         }
       } catch (err) {
         console.error('SSE Error:', err);
@@ -136,6 +216,11 @@ function VideoJsEmbedContent() {
 
     es.onerror = () => {
       es.close();
+      if (sourcesRef.current.length === 0) {
+        setIsLoading(true);
+        setStatusTitle('Connection Error');
+        setStatusSubtitle('Unable to receive stream data from server.');
+      }
     };
 
     return () => {
@@ -143,48 +228,17 @@ function VideoJsEmbedContent() {
     };
   }, [id, type, season, episode]);
 
-  const playStream = (list: any[], index: number) => {
-    const src = list[index];
-    if (!src || !playerRef.current) return;
-
-    setCurrentIdx(index);
-    setIsLoading(false);
-    triggerToast(`Connected: ${src.label || src.source}`);
-
-    const streamUrl = src.url;
-    const isHls = streamUrl.includes('.m3u8') || src.type === 'hls' || streamUrl.includes('api?url=');
-    const mimeType = isHls ? 'application/x-mpegURL' : 'video/mp4';
-
-    playerRef.current.src({
-      src: streamUrl,
-      type: mimeType,
-    });
-
-    playerRef.current.ready(() => {
-      if (autoplay) {
-        playerRef.current.play().catch(() => {});
-      }
-    });
-  };
-
-  const triggerFallback = () => {
-    setSources((prev) => {
-      if (currentIdx + 1 < prev.length) {
-        triggerToast(`Server failed. Trying backup #${currentIdx + 2}...`);
-        playStream(prev, currentIdx + 1);
-      } else {
-        setIsLoading(true);
-        setStatusTitle('Playback Failed');
-        setStatusSubtitle('All candidate servers exhausted.');
-      }
-      return prev;
-    });
-  };
-
   return (
     <div className="relative w-screen h-screen bg-black overflow-hidden flex items-center justify-center select-none">
-      {/* Video.js Container */}
-      <div ref={videoContainerRef} className="w-full h-full object-contain" />
+      {/* Official Video.js HTML container */}
+      <div data-vjs-player className="w-full h-full flex items-center justify-center">
+        <video
+          ref={videoRef}
+          className="video-js vjs-default-skin vjs-big-play-centered w-full h-full"
+          playsInline
+          crossOrigin="anonymous"
+        />
+      </div>
 
       {/* Top Overlay: Title & Active Server */}
       <div className="absolute top-0 left-0 right-0 p-4 sm:p-5 flex items-center justify-between z-20 pointer-events-none bg-gradient-to-b from-black/80 via-black/30 to-transparent">
@@ -209,16 +263,16 @@ function VideoJsEmbedContent() {
           >
             <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
             <span className="text-[11px] font-medium text-slate-200">
-              {sources[currentIdx]?.label || sources[currentIdx]?.source || 'Auto Server'}
+              {sourcesList[activeIdx]?.label || sourcesList[activeIdx]?.source || 'Auto Server'}
             </span>
             <ChevronDown className="w-3.5 h-3.5 text-slate-400" />
           </button>
         </div>
       </div>
 
-      {/* Loading Overlay */}
+      {/* Loading Overlay (hidden as soon as first source is received) */}
       {isLoading && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 backdrop-blur-sm z-30">
+        <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 backdrop-blur-sm z-30 pointer-events-none">
           <div className="relative flex items-center justify-center mb-4">
             <div className="w-16 h-16 rounded-full border-4 border-indigo-500/20 border-t-indigo-500 animate-spin" />
             <div className="absolute w-8 h-8 rounded-full bg-indigo-600/30 blur-md animate-pulse" />
@@ -251,19 +305,19 @@ function VideoJsEmbedContent() {
             </button>
           </div>
           <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1">
-            {sources.map((src, i) => (
+            {sourcesList.map((src, i) => (
               <button
                 key={i}
                 onClick={() => {
-                  playStream(sources, i);
+                  playSource(i);
                   setIsServerModalOpen(false);
                 }}
                 className={`w-full text-left px-3 py-2 rounded-xl text-xs transition flex items-center justify-between ${
-                  i === currentIdx ? 'bg-indigo-600 text-white font-semibold shadow-md' : 'text-slate-300 hover:bg-white/10'
+                  i === activeIdx ? 'bg-indigo-600 text-white font-semibold shadow-md' : 'text-slate-300 hover:bg-white/10'
                 }`}
               >
                 <div className="flex items-center space-x-2 truncate">
-                  <span className={`w-1.5 h-1.5 rounded-full ${i === currentIdx ? 'bg-white' : 'bg-indigo-400'}`} />
+                  <span className={`w-1.5 h-1.5 rounded-full ${i === activeIdx ? 'bg-white' : 'bg-indigo-400'}`} />
                   <span className="truncate">{src.label || src.source}</span>
                 </div>
                 <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-black/40 border border-white/10">
